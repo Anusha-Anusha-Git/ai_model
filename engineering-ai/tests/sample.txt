@@ -1,0 +1,6 @@
+Project: Test Site
+Pile diameter: 324 mm
+Pile thickness: 9.5 mm
+Fy: 350 MPa
+Compression load: 450 kN
+Tension load: 120 kN

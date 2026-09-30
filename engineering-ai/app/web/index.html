@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engineering AI · Field Extraction</title>
+<style>
+  :root {
+    --sky-50:  #eef7fd;
+    --sky-100: #dcf0fb;
+    --sky-200: #c3e5f8;
+    --sky-300: #9ed6f3;
+    --sky-400: #66bfec;
+    --sky-500: #33a3e2;
+    --sky-600: #1e84cc;
+    --sky-700: #1769a8;
+    --sky-800: #14537f;
+    --ink: #14394f;
+    --muted: #5a7a8f;
+    --card: #ffffff;
+    --line: #cfe5f4;
+    --warn-bg: #fff6e5;
+    --warn-line: #f0c97a;
+    --warn-ink: #7a5200;
+    --conf-bg: #fdeeef;
+    --conf-line: #e8a2a8;
+    --conf-ink: #a03a43;
+    --ok: #2e9e6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: linear-gradient(180deg, var(--sky-100), var(--sky-50) 280px);
+    color: var(--ink);
+    min-height: 100vh;
+  }
+  header {
+    background: linear-gradient(120deg, var(--sky-600), var(--sky-400));
+    color: #fff;
+    padding: 22px 28px;
+    box-shadow: 0 2px 10px rgba(30, 132, 204, .25);
+  }
+  header h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: .2px; }
+  header p { margin: 4px 0 0; opacity: .92; font-size: 13px; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 22px 24px 60px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 1px 4px rgba(23, 105, 168, .10);
+    padding: 18px 20px;
+    margin-bottom: 18px;
+  }
+  .card h2 { margin: 0 0 12px; font-size: 15px; color: var(--sky-800); }
+
+  /* ---- inputs ---- */
+  .drop {
+    border: 2px dashed var(--sky-400);
+    border-radius: 10px;
+    padding: 22px;
+    text-align: center;
+    color: var(--muted);
+    background: var(--sky-50);
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  .drop.drag { background: var(--sky-200); border-color: var(--sky-600); color: var(--sky-800); }
+  .drop .big { font-size: 14px; color: var(--sky-700); margin-bottom: 4px; }
+  textarea {
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px;
+    font: inherit;
+    color: var(--ink);
+    background: #fff;
+    outline: none;
+  }
+  textarea:focus { border-color: var(--sky-500); box-shadow: 0 0 0 3px var(--sky-200); }
+  .rowbtns { display: flex; gap: 10px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
+  button {
+    border: none;
+    border-radius: 8px;
+    padding: 9px 18px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter .15s, opacity .15s;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .primary { background: var(--sky-500); color: #fff; }
+  .primary:hover { filter: brightness(1.08); }
+  .ghost { background: #fff; color: var(--sky-700); border: 1px solid var(--sky-300); }
+  .ghost:hover { background: var(--sky-100); }
+  .files { margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .files span { display: inline-block; background: var(--sky-100); color: var(--sky-800);
+                border: 1px solid var(--sky-300); border-radius: 20px; padding: 2px 10px; margin: 2px 4px 2px 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+
+  /* ---- summary chips ---- */
+  .chips { display: flex; gap: 10px; flex-wrap: wrap; }
+  .chip {
+    flex: 1 1 140px;
+    border: 1px solid var(--line);
+    background: var(--sky-50);
+    border-radius: 10px;
+    padding: 10px 14px;
+  }
+  .chip b { display: block; font-size: 22px; color: var(--sky-700); }
+  .chip small { color: var(--muted); }
+
+  /* ---- conflicts ---- */
+  .conflict {
+    border: 1px solid var(--conf-line);
+    border-left: 5px solid var(--conf-ink);
+    background: var(--conf-bg);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+    font-size: 13px;
+  }
+  .conflict .tag { display: inline-block; font-weight: 700; color: #fff;
+    background: var(--conf-ink); border-radius: 4px; padding: 1px 8px; margin-right: 6px; }
+  .conflict code { background: #fff; border: 1px solid var(--conf-line); border-radius: 4px; padding: 0 4px; }
+
+  /* ---- warnings ---- */
+  .warn {
+    border: 1px solid var(--warn-line);
+    border-left: 5px solid var(--warn-ink);
+    background: var(--warn-bg);
+    color: var(--warn-ink);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+
+  /* ---- key points ---- */
+  .ksec { border-top: 1px solid var(--line); padding: 10px 0 12px; }
+  .ksec:first-of-type { border-top: none; padding-top: 4px; }
+  .ksec h3 { font-size: 12px; letter-spacing: .8px; text-transform: uppercase;
+             color: var(--sky-700); margin: 0 0 8px; }
+  .ksec .kv { padding: 3px 0; font-size: 13px; }
+  .ksec .kv b { font-weight: 600; color: var(--ink); }
+  .ksec .kv .val { font-variant-numeric: tabular-nums; }
+  .ksec ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
+  .ksec li { margin: 3px 0; }
+  .okchk { color: var(--ok); }
+  .badchk { color: var(--conf-ink); }
+
+  /* ---- results table ---- */
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--sky-100); color: var(--sky-800); white-space: nowrap; }
+  tr:hover td { background: var(--sky-50); }
+  td.param { font-weight: 600; }
+  td.num { font-variant-numeric: tabular-nums; }
+  .unit { color: var(--muted); }
+  .ctx { color: var(--sky-700); background: var(--sky-100); border-radius: 4px; padding: 0 6px; font-size: 12px; }
+  .src { font-size: 12px; color: var(--muted); }
+  .raw { font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
+  [contenteditable] { outline: none; border-radius: 4px; }
+  [contenteditable]:hover { background: #fff; box-shadow: inset 0 0 0 1px var(--sky-300); }
+  [contenteditable]:focus { box-shadow: inset 0 0 0 2px var(--sky-500); }
+  td.edited { background: #e7faef !important; box-shadow: inset 0 0 0 2px var(--ok); }
+  .oknote { color: var(--ok); font-size: 12px; }
+  /* ---- clean engineering summary (generated markdown) ---- */
+  #summary-output {
+    background: var(--sky-50); border: 1px solid var(--sky-200);
+    border-radius: 8px; padding: 4px 20px 16px; color: var(--ink);
+  }
+  .subhead { font-size: 12px; letter-spacing: .8px; text-transform: uppercase;
+             color: var(--sky-700); margin: 0 0 8px; }
+  .mdsum { font-size: 12px; letter-spacing: .8px; text-transform: uppercase;
+           color: var(--sky-700); margin: 18px 0 6px; }
+  .mdsum:first-child { margin-top: 0; }
+  .mdbul { padding: 3px 0 3px 14px; border-left: 3px solid var(--sky-200);
+           margin: 3px 0; font-size: 13px; }
+  .mdline { font-size: 13px; }
+
+  .hidden { display: none; }
+  .pane { margin-top: 14px; }
+  .spin {
+    display: inline-block; width: 14px; height: 14px; margin-right: 8px;
+    border: 2px solid var(--sky-200); border-top-color: var(--sky-600);
+    border-radius: 50%; animation: rot .7s linear infinite; vertical-align: -2px;
+  }
+  @keyframes rot { to { transform: rotate(360deg); } }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 18px; }
+  .pill { display: inline-block; border-radius: 20px; padding: 2px 10px; font-size: 12px;
+          background: var(--sky-100); color: var(--sky-800); border: 1px solid var(--sky-300); }
+  .pill.bad { background: var(--conf-bg); color: var(--conf-ink); border-color: var(--conf-line); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Engineering AI · Field Extraction  </h1>
+  <p>Deterministic extraction of engineering fields from PDF / DOCX / XLSX / CSV / TXT, with full provenance and conflict flags. No AI guessing.</p>
+</header>
+
+<div class="wrap">
+
+  <section class="card">
+    <h2>1 · Input</h2>
+    <div class="drop" id="drop">
+      <div class="big">Drop files here, or click to browse</div>
+      <div class="muted">PDF · DOCX · XLSX · CSV · TXT — multiple files allowed (max 20 MB each)</div>
+    </div>
+    <input type="file" id="fileInput" multiple accept=".pdf,.docx,.xlsx,.csv,.txt,application/pdf,vnd.openxmlformats-officedocument.wordprocessingml.document,vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/plain" class="hidden">
+    <div class="files" id="fileList"></div>
+
+    <p class="muted" style="margin:16px 0 6px;">…or paste engineering text directly:</p>
+    <textarea id="textArea" placeholder="Example:&#10;Required axial capacity (ULS): compression 980 kN, tension 610 kN.&#10;Pile section: 324 mm OD, wall thickness 12.7 mm, Fy = 450 MPa."></textarea>
+
+    <div class="rowbtns">
+      <button class="primary" id="runBtn">Extract fields</button>
+      <button class="ghost" id="clearBtn">Clear</button>
+      <span class="muted" id="status"></span>
+    </div>
+  </section>
+
+  <section class="card hidden" id="summaryCard">
+    <h2>2 · Summary</h2>
+    <h3 class="subhead">Clean engineering summary</h3>
+    <div id="summary-output"></div>
+    <div class="chips">
+      <div class="chip"><b id="cFiles">0</b><small>documents</small></div>
+      <div class="chip"><b id="cFields">0</b><small>fields</small></div>
+      <div class="chip"><b id="cKP">0</b><small>key points</small></div>
+      <div class="chip"><b id="cConf">0</b><small>conflicts</small></div>
+      <div class="chip"><b id="cWarn">0</b><small>warnings</small></div>
+    </div>
+    <div class="rowbtns">
+      <button class="ghost" id="dlBtn">Download results (JSON)</button>
+      <span class="muted">The download includes the clean summary, key points, conflicts, warnings, and every extracted field.</span>
+    </div>
+  </section>
+
+  <section class="card hidden" id="keyCard">
+    <h2>Key Points &amp; Engineering Evaluation</h2>
+    <div id="keySections"></div>
+  </section>
+
+  <section class="card hidden" id="conflictCard">
+    <h2>Conflicts — never silently resolved</h2>
+    <div id="conflictList"></div>
+  </section>
+
+  <section class="card hidden" id="warnCard">
+    <h2>Warnings</h2>
+    <div id="warnList"></div>
+  </section>
+
+  <footer>AI output is never certified or approved engineering work. Values shown are raw extractions (or your own edits), always traceable to the source document.</footer>
+</div>
+
+<script>
+"use strict";
+
+/* ---------- state ---------- */
+let fields = [];          // [{id, parameter, context, value, unit, source, location, raw, original, edited}]
+let conflicts = [];
+let warnings = [];
+let keyPoints = null;     // {project, pile, loads, results, evaluation, references, missing}
+let cleanSummary = "";    // deterministic clean engineering summary (markdown)
+let fileNames = [];
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* ---------- drag & drop + file list ---------- */
+const drop = $("drop"), fileInput = $("fileInput");
+drop.addEventListener("click", () => fileInput.click());
+["dragover", "dragenter"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("drag"); }));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("drag"); }));
+drop.addEventListener("drop", e => {
+  e.preventDefault();
+  if (e.dataTransfer.files.length) {
+    fileInput.files = e.dataTransfer.files;
+    refreshFileList();
+  }
+});
+fileInput.addEventListener("change", refreshFileList);
+
+function refreshFileList() {
+  fileNames = Array.from(fileInput.files || []).map(f => f.name);
+  $("fileList").innerHTML = fileNames.map(n => `<span>${esc(n)}</span>`).join("");
+  $("status").textContent = fileNames.length ? `${fileNames.length} file(s) selected` : "";
+}
+
+$("clearBtn").addEventListener("click", () => {
+  fileInput.value = ""; fileNames = []; $("fileList").innerHTML = "";
+  $("textArea").value = "";
+  $("status").textContent = "";
+  $("summary-output").innerHTML = "";
+  cleanSummary = "";
+  ["summaryCard","keyCard","conflictCard","warnCard"].forEach(id => $(id).classList.add("hidden"));
+  fields = []; conflicts = []; warnings = []; keyPoints = null;
+});
+
+/* ---------- extract ---------- */
+$("runBtn").addEventListener("click", run);
+$("textArea").addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run(); });
+
+async function run() {
+  const text = $("textArea").value.trim();
+  const files = Array.from(fileInput.files || []);
+  if (!text && files.length === 0) { $("status").textContent = "Add files or paste text first."; return; }
+
+  $("runBtn").disabled = true;
+  $("status").innerHTML = `<span class="spin"></span>Extracting…`;
+  try {
+    let payload;
+    if (files.length > 0) {
+      const fd = new FormData();
+      files.forEach(f => fd.append("file", f));
+      payload = await fetch("/api/extract", { method: "POST", body: fd }).then(r => r.json());
+      if (text) { // paste + files: run paste separately and merge sources
+        const p = await fetch("/api/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text })
+        }).then(r => r.json());
+        payload = merge(payload, p);
+      }
+    } else {
+      payload = await fetch("/api/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      }).then(r => r.json());
+    }
+    if (payload.error) throw new Error(payload.error);
+    render(payload);
+    $("status").textContent = "Done — all values deterministic (float() parse, no LLM).";
+  } catch (err) {
+    $("status").textContent = "Error: " + err.message;
+  } finally {
+    $("runBtn").disabled = false;
+  }
+}
+
+function merge(a, b) { // combine fields/conflicts/warnings from two payloads
+  return {
+    fields: a.fields.concat(b.fields),
+    conflicts: a.conflicts.concat(b.conflicts),
+    warnings: a.warnings.concat(b.warnings),
+    key_points: mergeKeyPoints(a.key_points, b.key_points),
+    clean_engineering_summary: [a.clean_engineering_summary, b.clean_engineering_summary]
+      .filter(Boolean).join("\n\n")
+  };
+}
+
+function mergeKeyPoints(a, b) {
+  const empty = {project:[],pile:[],loads:[],results:[],evaluation:[],references:[],missing:[]};
+  a = a || empty; b = b || empty;
+  const concat = (k) => (a[k] || []).concat(b[k] || []);
+  return {
+    project: concat("project"), pile: concat("pile"), loads: concat("loads"),
+    results: concat("results"), evaluation: concat("evaluation"),
+    references: concat("references"),
+    missing: Array.from(new Set(concat("missing"))),
+    source_count: (a.project.length + b.project.length)
+  };
+}
+
+/* ---------- render ---------- */
+const mdInline = (text) => text.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+
+/* The clean summary is generated markdown (### headings, - bullets, **bold**
+   labels). Every value comes from an uploaded document, so the text is HTML-
+   escaped first and only our own tags are added afterwards. */
+function renderSummary(md) {
+  if (!md) return "";
+  return esc(md).split("\n").map(line => {
+    if (/^###\s+/.test(line)) return `<h3 class="mdsum">${mdInline(line.replace(/^###\s+/, ""))}</h3>`;
+    if (/^-\s+/.test(line)) return `<div class="mdbul">${mdInline(line.replace(/^-\s+/, ""))}</div>`;
+    return line.trim() ? `<div class="mdline">${mdInline(line)}</div>` : "";
+  }).join("");
+}
+
+function render(payload) {
+  fields = payload.fields.map((f, i) => ({
+    id: `f${i}`, parameter: f.parameter, context: f.context || "",
+    section: f.section || "", value: f.value,
+    unit: f.unit || "", source: f.source, location: f.location, raw: f.raw,
+    original: f.value, edited: false
+  }));
+  conflicts = payload.conflicts || [];
+  warnings = payload.warnings || [];
+  cleanSummary = payload.clean_engineering_summary || "";
+  $("summary-output").innerHTML = renderSummary(cleanSummary);
+
+  const files = new Set(payload.fields.map(f => f.source));
+  $("cFiles").textContent = files.size;
+  $("cFields").textContent = fields.length;
+  renderKeyPoints(payload.key_points, fields.length);
+  $("cConf").textContent = conflicts.length;
+  $("cWarn").textContent = warnings.length;
+  ["summaryCard"].forEach(id => $(id).classList.remove("hidden"));
+
+  renderConflicts();
+  renderWarnings();
+}
+
+function kvRow(kp) {
+  const unit = kp.unit ? ` <span class="unit">${esc(kp.unit)}</span>` : "";
+  const ctx = kp.context ? ` <span class="ctx">${esc(kp.context)}</span>` : "";
+  const src = kp.source ? ` <span class="src">${esc(kp.source)} · ${esc(kp.location)}</span>` : "";
+  return `<div class="kv"><b>${esc(kp.label)}</b>${ctx}<span class="val">${esc(kp.value)}</span>${unit}${src}</div>`;
+}
+
+function keySection(title, points) {
+  if (!points || !points.length) return "";
+  return `<div class="ksec"><h3>${esc(title)}</h3>${points.map(kvRow).join("")}</div>`;
+}
+
+function renderKeyPoints(kp, fieldCount) {
+  keyPoints = kp || {project:[],pile:[],loads:[],results:[],evaluation:[],references:[],missing:[]};
+  const count = keyPoints.project.length + keyPoints.pile.length +
+                keyPoints.loads.length + keyPoints.results.length;
+  $("cKP").textContent = count || fieldCount || 0;
+
+  let html = keySection("Project", keyPoints.project)
+    + keySection("Pile (executive summary)", keyPoints.pile)
+    + keySection("Loads", keyPoints.loads)
+    + keySection("Results (D/C ratios)", keyPoints.results);
+
+  if (keyPoints.evaluation && keyPoints.evaluation.length) {
+    html += `<div class="ksec"><h3>Engineering evaluation</h3><ul>` +
+      keyPoints.evaluation.map(e => {
+        const cls = /OVER CAPACITY/i.test(e) || /Missing/i.test(e) ? "badchk" : "okchk";
+        return `<li class="${cls}">${esc(e)}</li>`;
+      }).join("") + `</ul></div>`;
+  }
+  if (keyPoints.references && keyPoints.references.length) {
+    html += `<div class="ksec"><h3>References</h3><ul>` +
+      keyPoints.references.map(r => `<li>[${r.index}] ${esc(r.text)}</li>`).join("") +
+      `</ul></div>`;
+  }
+  if (keyPoints.missing && keyPoints.missing.length) {
+    html += `<div class="ksec"><h3>Missing (never invented)</h3>` +
+      keyPoints.missing.map(m => `<span class="pill bad">${esc(m)}</span>`).join(" ") +
+      `</div>`;
+  }
+  $("keySections").innerHTML = html || "<p class='muted'>Nothing to summarise.</p>";
+  // The Key Points card is the raw per-field dump: it stays hidden so the clean
+  // engineering summary is the only thing on screen. Key points are still built
+  // into the global `keyPoints` and remain in the JSON download.
+  $("keyCard").classList.add("hidden");
+}
+
+function renderConflicts() {
+  const card = $("conflictCard"), list = $("conflictList");
+  // Like the Key Points card, conflicts are a raw per-field dump: built and
+  // kept in the JSON download, but hidden so the clean summary is the only
+  // thing on screen.
+  card.classList.add("hidden");
+  list.innerHTML = conflicts.map(c => {
+    const sides = c.fields.map(f =>
+      `<code>${esc(f.raw)} <span class="unit">(${esc(f.unit || "no unit")})</span></code>` +
+      ` <span class="src">${esc(f.source)} · ${esc(f.location)}</span>`
+    ).join("<br>");
+    const tag = c.kind === "unit" ? "UNIT" : "VALUE";
+    return `<div class="conflict"><span class="tag">${tag}</span>` +
+           `<b>${esc(c.parameter)}</b> — ${esc(c.parameter)} appears with disagreeing values:<br>${sides}</div>`;
+  }).join("");
+}
+
+function renderWarnings() {
+  const card = $("warnCard"), list = $("warnList");
+  if (!warnings.length) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  list.innerHTML = warnings.map(w => `<div class="warn">${esc(w)}</div>`).join("");
+}
+
+/* ---------- download ---------- */
+$("dlBtn").addEventListener("click", () => {
+  const out = {
+    extracted_at: new Date().toISOString(),
+    note: "Raw deterministic extractions; edited cells are marked as corrections. AI output is never certified engineering work.",
+    summary: {
+      fields: fields.length,
+      conflicts: conflicts.length,
+      warnings: warnings.length
+    },
+    clean_engineering_summary: cleanSummary,
+    key_points: keyPoints || {
+      project: [], pile: [], loads: [], results: [],
+      evaluation: [], references: [], missing: []
+    },
+    conflicts,
+    warnings,
+    fields: fields.map(f => ({
+      parameter: f.parameter,
+      context: f.context,
+      section: f.section,
+      value: f.value,
+      unit: f.unit,
+      source: f.source,
+      location: f.location,
+      raw: f.raw,
+      original: f.original,
+      corrected: f.edited
+    }))
+  };
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "extraction_results.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
+</html>

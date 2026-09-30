@@ -1,0 +1,29 @@
+PROJECT: Greenfield Substation & Control Building
+PROJECT NO: G-2049
+CLIENT: Meridian Utilities Co.
+LOCATION: Comal County, Texas
+STRUCTURE: Reinforced concrete foundations on helical piles
+SUBMISSION DATE: 2026-08-15
+
+EXECUTIVE SUMMARY
+The foundation for the substation transformer is supported on eight (8) driven helical piles.
+Pile diameter: 324 mm
+Pile wall thickness: 12.7 mm
+Yield strength (Fy): 345 MPa
+Helix No: 3
+Helix dia 1: 12 in
+Helix dia 2: 10 in
+Helix dia 3: 8 in
+
+LOADS
+ULS-1: compression 980 kN, tension 610 kN, shear 45 kN, moment 62 kN*m
+ULS-2: compression 720 kN, tension 420 kN, shear 38 kN, moment 51 kN*m
+
+RESULTS
+ULS-1 capacity ratio: 0.78
+ULS-2 capacity ratio: 0.65
+
+REFERENCES
+1. ASCE 7-22 Minimum Design Loads and Associated Criteria for Buildings and Other Structures
+2. AISC 360-22 Specification for Structural Steel Buildings
+3. Pile Design & Installation Specification, Project G-2049, Rev. B

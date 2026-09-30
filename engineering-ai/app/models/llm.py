@@ -6,12 +6,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 
 
-def load_model():
-    print(f"Loading {MODEL_NAME} ...")
+def load_model(quiet: bool = False):
+    if not quiet:
+        print(f"Loading {MODEL_NAME} ...")
     start = time.time()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    if not quiet:
+        print(f"Using device: {device}")
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForCausalLM.from_pretrained(
@@ -20,11 +22,18 @@ def load_model():
     ).to(device)
 
     elapsed = time.time() - start
-    print(f"Model loaded in {elapsed:.2f} seconds")
+    if not quiet:
+        print(f"Model loaded in {elapsed:.2f} seconds")
     return model, tokenizer
 
 
-def generate_response(model, tokenizer, prompt: str, max_new_tokens: int = 200):
+def generate_response(
+    model,
+    tokenizer,
+    prompt: str,
+    max_new_tokens: int = 200,
+    quiet: bool = False,
+):
     messages = [{"role": "user", "content": prompt}]
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -46,8 +55,9 @@ def generate_response(model, tokenizer, prompt: str, max_new_tokens: int = 200):
     )
 
     tokens_generated = output_ids.shape[-1] - inputs["input_ids"].shape[-1]
-    print(f"Generated {tokens_generated} tokens in {elapsed:.2f}s "
-          f"({tokens_generated/elapsed:.2f} tokens/sec)")
+    if not quiet:
+        print(f"Generated {tokens_generated} tokens in {elapsed:.2f}s "
+              f"({tokens_generated/elapsed:.2f} tokens/sec)")
 
     return response
 

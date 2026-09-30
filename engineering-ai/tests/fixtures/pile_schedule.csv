@@ -1,0 +1,6 @@
+Pile,Diameter (mm),Thickness (mm),Fy (MPa),Length (m)
+HP1,324,12.7,450,18.0
+HP2,406,12.7,450,18.0
+HP3,324,9.5,450,15.0
+
+Note,Generated fixture,12.7,mm wall,324 mm OD

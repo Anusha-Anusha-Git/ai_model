@@ -1,0 +1,4 @@
+Load Case;Compression (kN);Tension (kN);Shear (kN);Moment (kN*m)
+ULS-1;980;610;45;62
+ULS-2;720;420;38;51
+SLS-1;540;300;22;34

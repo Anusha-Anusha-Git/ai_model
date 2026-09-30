@@ -1,0 +1,11 @@
+PROJECT: Oak Creek Wind Farm -- Substation Foundations
+CLIENT: Ridgeview Power Co.
+LOCATION: Bastrop County, Texas
+SUBMISSION DATE: 2026-09-23
+
+The substation equipment is supported on driven steel pipe piles.
+Pile section: 324 mm OD nominal, wall thickness 12.7 mm.
+Steel grade: Fy = 450 MPa (F355NH, per EN 10219).
+Design pile length: 18.0 m embedded depth.
+Required axial capacity (ULS): compression 980 kN, tension 610 kN.
+Erection loads: shear 45 kN, moment 62 kN*m.

@@ -1,5 +1,12 @@
+# --- Stage 1: local LLM ---
 torch
 transformers
 accelerate
 sentencepiece
 psutil
+
+# --- Stage 2: document ingestion ---
+pymupdf
+python-docx
+openpyxl
+pytest
