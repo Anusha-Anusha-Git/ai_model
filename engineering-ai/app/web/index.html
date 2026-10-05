@@ -236,8 +236,9 @@
       <div class="chip"><b id="cWarn">0</b><small>warnings</small></div>
     </div>
     <div class="rowbtns">
-      <button class="ghost" id="dlBtn">Download results (JSON)</button>
-      <span class="muted">The download includes the clean summary, key points, conflicts, warnings, and every extracted field.</span>
+      <button class="ghost" id="pdfBtn">Download Executive Summary (PDF)</button>
+      <span class="pill bad hidden" id="pdfError"></span>
+      <span class="muted" id="pdfNote">A one-page summary of the project details, pile sizes, loads and results. Anything the source report does not state is marked as not found rather than filled in.</span>
     </div>
   </section>
 
@@ -480,43 +481,71 @@ function renderWarnings() {
   list.innerHTML = warnings.map(w => `<div class="warn">${esc(w)}</div>`).join("");
 }
 
-/* ---------- download ---------- */
-$("dlBtn").addEventListener("click", () => {
-  const out = {
-    extracted_at: new Date().toISOString(),
-    note: "Raw deterministic extractions; edited cells are marked as corrections. AI output is never certified engineering work.",
-    summary: {
-      fields: fields.length,
-      conflicts: conflicts.length,
-      warnings: warnings.length
-    },
-    clean_engineering_summary: cleanSummary,
-    key_points: keyPoints || {
-      project: [], pile: [], loads: [], results: [],
-      evaluation: [], references: [], missing: []
-    },
-    conflicts,
-    warnings,
-    fields: fields.map(f => ({
-      parameter: f.parameter,
-      context: f.context,
-      section: f.section,
-      value: f.value,
-      unit: f.unit,
-      source: f.source,
-      location: f.location,
-      raw: f.raw,
-      original: f.original,
-      corrected: f.edited
-    }))
-  };
-  const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "extraction_results.json";
-  a.click();
-  URL.revokeObjectURL(a.href);
+/* ---------- download: Executive Summary PDF ---------- */
+$("pdfBtn").addEventListener("click", async () => {
+  const note = $("pdfNote");
+  const err = $("pdfError");
+  const btn = $("pdfBtn");
+  btn.disabled = true;
+  err.classList.add("hidden");
+  const resting = note.textContent;
+  note.innerHTML = `<span class="spin"></span>Preparing your Executive Summary…`;
+  try {
+    const res = await fetch("/api/executive-summary.pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Send exactly what is on screen, including user corrections.
+      body: JSON.stringify({
+        clean_engineering_summary: cleanSummary,
+        conflicts,
+        warnings,
+        key_points: keyPoints,
+        fields: fields.map(f => ({
+          parameter: f.parameter,
+          context: f.context,
+          section: f.section,
+          value: f.value,
+          unit: f.unit,
+          source: f.source,
+          location: f.location,
+          raw: f.raw,
+          original: f.original,
+          corrected: f.edited
+        }))
+      })
+    });
+    if (!res.ok) throw new Error("request failed");
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filenameFromResponse(res) || "Executive_Summary.pdf";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    note.textContent = "Your Executive Summary has been downloaded.";
+  } catch (e) {
+    err.textContent = "We couldn't prepare the PDF just now. Please try again in a moment.";
+    err.classList.remove("hidden");
+    note.textContent = resting;
+  } finally {
+    btn.disabled = false;
+  }
 });
+
+/* Read the filename the server chose, so the saved file is named after the
+   project. Falls back quietly -- a header we cannot parse must not stop the
+   download. */
+function filenameFromResponse(res) {
+  try {
+    const header = res.headers.get("Content-Disposition") || "";
+    const match = header.match(/filename="?([^";]+)"?/i);
+    return match ? match[1].trim() : "";
+  } catch (e) {
+    return "";
+  }
+}
 </script>
 </body>
 </html>

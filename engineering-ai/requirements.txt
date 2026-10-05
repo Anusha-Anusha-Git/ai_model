@@ -10,3 +10,6 @@ pymupdf
 python-docx
 openpyxl
 pytest
+
+# --- Stage 1 (PDF): fixed-layout report generator ---
+reportlab

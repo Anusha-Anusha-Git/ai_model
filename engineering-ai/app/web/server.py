@@ -22,7 +22,9 @@ from pathlib import Path
 
 from app.extraction.document_loader import ExtractedDocument, TextChunk, load_document
 from app.extraction.field_extractor import extract_fields
+from app.pdf_builder import build_executive_summary_pdf, executive_summary_filename
 from app.report.key_points import extract_key_points
+from app.report.pdf_report import ExtractionPayload, generate_pdf
 from app.report.summary import generate_clean_summary
 
 WEB_DIR = Path(__file__).resolve().parent
@@ -39,6 +41,31 @@ def _json_response(handler: BaseHTTPRequestHandler, payload, status: int = 200) 
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _pdf_response(handler: BaseHTTPRequestHandler, body: bytes, filename: str) -> None:
+    """Send PDF bytes as a download (never as JSON)."""
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/pdf")
+    handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _render_pdf(fields: list[dict], conflicts: list[dict], warnings: list[str]) -> bytes:
+    """Build the fixed-layout PDF and return its bytes.
+
+    The browser posts the fields it currently holds, so any value the user
+    corrected on screen is what gets printed. This module is the only place
+    the PDF is assembled -- the UI never builds a report itself.
+    """
+    payload = ExtractionPayload.from_dict(
+        {"fields": fields, "conflicts": conflicts, "warnings": warnings}
+    )
+    with tempfile.TemporaryDirectory(prefix="engai-pdf-") as tmp:
+        out = generate_pdf(payload, Path(tmp) / "review.pdf")
+        return out.read_bytes()
 
 
 def _read_body(handler: BaseHTTPRequestHandler) -> bytes:
@@ -128,17 +155,47 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
-            payload = self._handle_post()
+            result = self._handle_post()
         except Exception as exc:  # never crash the thread, report to the client
             _json_response(self, {"error": str(exc)}, status=400)
             return
-        _json_response(self, payload)
+        if isinstance(result, tuple):
+            body, filename = result
+            _pdf_response(self, body, filename)
+            return
+        _json_response(self, result)
 
-    def _handle_post(self) -> dict:
+    def _handle_post(self):
         route = self.path.split("?", 1)[0]
         if route == "/api/extract":
             return self._api_extract()
+        if route == "/api/pdf":
+            return self._api_pdf()
+        if route == "/api/executive-summary.pdf":
+            return self._api_executive_summary_pdf()
         raise ValueError(f"unknown route {route}")
+
+    def _api_executive_summary_pdf(self) -> tuple[bytes, str]:
+        """Render the 1-2 page Executive Summary PDF.
+
+        Stateless like every other route here: the browser sends the data it
+        already holds, so any value corrected on screen is the value printed,
+        and no model is loaded to rebuild it.
+        """
+        data = json.loads(_read_body(self).decode("utf-8") or "{}")
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+        body = build_executive_summary_pdf(data)
+        return body, executive_summary_filename(data)
+
+    def _api_pdf(self) -> tuple[bytes, str]:
+        """Render the fixed-layout PDF from the fields the browser sends."""
+        data = json.loads(_read_body(self).decode("utf-8") or "{}")
+        fields = [item for item in data.get("fields") or [] if isinstance(item, dict)]
+        conflicts = [item for item in data.get("conflicts") or [] if isinstance(item, dict)]
+        warnings = [str(item) for item in data.get("warnings") or []]
+        body = _render_pdf(fields, conflicts, warnings)
+        return body, "helical_pile_review_report.pdf"
 
     def _api_extract(self) -> dict:
         content_type = self.headers.get("Content-Type", "")

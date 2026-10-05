@@ -117,7 +117,7 @@ PROCESSING RULES:
 4. Use only DESIGN capacities in the requested capacity fields. Never substitute an ULTIMATE capacity. If design capacity is absent, write "{MISSING_VALUE}".
 5. Governing stage: use an explicitly printed governing stage; otherwise select the stage with the largest explicitly reported R/CAP in the final analysis-summary rows. If no valid comparison exists, write "{MISSING_VALUE}".
 6. Overall adequacy is PASS only when the governing R/CAP is explicitly reported and less than 1.0. A ratio greater than or equal to 1.0 is FAIL. If no governing ratio is available, state FAIL — adequacy cannot be demonstrated from the reported ratios.
-7. Preserve source units. If a printed number has no unit, write "value (unit {MISSING_VALUE})". Ratios are dimensionless and may be written with "(dimensionless)".
+7. Preserve source units exactly as printed. If a printed number has no unit, write the bare number with no unit suffix and no unit note. Ratios are dimensionless and may be written with "(dimensionless)".
 8. If a required value is absent, write exactly "{MISSING_VALUE}". If final values conflict and the governing value cannot be identified, write "{MISSING_VALUE}" and identify the conflict under Red Flags to Verify.
 9. Infer Location only when the supplied source path contains an explicit place name. Do not treat generic folder names, usernames, or filenames as a project location.
 10. References must cite the exact supplied source filename and page, sheet, table, or line location. Cite exact table column headers when no printed table title exists. Never invent a table name or page. If no source location is available, write "{MISSING_VALUE}".
@@ -796,11 +796,14 @@ def _first_numeric(fields, searches) -> str:
 
 
 def _format_measured(value: str, key: str) -> str:
-    """Keep the printed unit; say so explicitly when the report printed none."""
-    if value == MISSING_VALUE or key in _DIMENSIONLESS_LINES:
-        return value
-    if _leading_number(value) is not None and not re.search(r"[A-Za-z]", value):
-        return f"{value} (unit {MISSING_VALUE})"
+    """Keep the printed unit; print a bare number bare.
+
+    A value whose source printed no unit is shown as the number alone. The
+    "(unit Not specified)" suffix is deliberately not used: it reads as a
+    finding about the source rather than an engineering value, and it pushed
+    the words "Not specified" into lines that otherwise looked populated.
+    The unit is still never invented -- it is simply left absent.
+    """
     return value
 
 
