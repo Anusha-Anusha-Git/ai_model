@@ -615,13 +615,17 @@ def _smart_contains(value, keyword) -> bool:
     return needle in text
 
 
-def find_smart(fields, param_keyword, context_keyword=None):
-    """Search noisy extracted fields for a usable value."""
+def _smart_field(fields, param_keyword, context_keyword=None):
+    """The first usable field matching a smart keyword, or None.
+
+    This is the single matching rule behind ``find_smart``: callers that need
+    the value's provenance (the Executive Summary PDF) read the field directly
+    rather than re-deriving the lookup.
+    """
     for field in fields:
         parameter = field.get("Parameter", field.get("parameter", ""))
         context = _clean(field.get("Context", field.get("context")))
         value = _clean(field.get("Value", field.get("value")))
-        unit = _clean(field.get("Unit", field.get("unit")))
         if not _smart_contains(parameter, param_keyword):
             continue
         if context_keyword is not None and not (
@@ -631,16 +635,27 @@ def find_smart(fields, param_keyword, context_keyword=None):
             continue
         if not value or value.casefold() in _SMART_GARBAGE_VALUES:
             continue
-        return f"{value} {unit}".strip()
-    return MISSING_VALUE
+        return field
+    return None
+
+
+def find_smart(fields, param_keyword, context_keyword=None):
+    """Search noisy extracted fields for a usable value."""
+    field = _smart_field(fields, param_keyword, context_keyword)
+    return _field_text(field) if field is not None else MISSING_VALUE
+
+
+def _first_smart_field(fields, searches):
+    for param_keyword, context_keyword in searches:
+        field = _smart_field(fields, param_keyword, context_keyword)
+        if field is not None:
+            return field
+    return None
 
 
 def _first_smart(fields, searches) -> str:
-    for param_keyword, context_keyword in searches:
-        value = find_smart(fields, param_keyword, context_keyword)
-        if value != "Not specified":
-            return value
-    return "Not specified"
+    field = _first_smart_field(fields, searches)
+    return _field_text(field) if field is not None else MISSING_VALUE
 
 
 def _leading_number(text) -> float | None:
@@ -658,6 +673,15 @@ def _field_text(field) -> str:
     value, unit = _clean(field.get("Value", field.get("value"))), _clean(
         field.get("Unit", field.get("unit")))
     return f"{value} {unit}".strip() if unit else value
+
+
+def field_text(field) -> str:
+    """Printed "value unit" for one resolved field (public wrapper).
+
+    Used by the Executive Summary PDF to render the same text the clean summary
+    shows for the field returned by :func:`resolve_summary_field`.
+    """
+    return _field_text(field)
 
 
 # A pile-schedule row label ("HP1", "P-3"). A bare "Diameter" or "Thickness"
@@ -680,15 +704,9 @@ def _find_pile_row(fields, param_keywords) -> str:
     return MISSING_VALUE
 
 
-def _find_governing(fields, param_keywords) -> tuple[str, str]:
-    """Largest explicitly reported value for these parameters.
-
-    Returns (printed value + unit, row context) so the governing row keeps its
-    provenance. Stage 6 rule 5: the governing row is the one with the largest
-    explicitly reported ratio -- never an assumed or hardcoded one. Returns
-    (MISSING_VALUE, "") when the report prints no such value.
-    """
-    best_text, best_context, best_number = MISSING_VALUE, "", None
+def _governing_field(fields, param_keywords) -> tuple[dict | None, str]:
+    """The field holding the largest explicitly reported value, with context."""
+    best_field, best_context, best_number = None, "", None
     for keyword in param_keywords:
         for field in fields:
             parameter = field.get("Parameter", field.get("parameter", ""))
@@ -699,9 +717,21 @@ def _find_governing(fields, param_keywords) -> tuple[str, str]:
                 continue
             if best_number is None or number > best_number:
                 best_number = number
-                best_text = _field_text(field)
+                best_field = field
                 best_context = _clean(field.get("Context", field.get("context")))
-    return best_text, best_context.strip()
+    return best_field, best_context.strip()
+
+
+def _find_governing(fields, param_keywords) -> tuple[str, str]:
+    """Largest explicitly reported value for these parameters.
+
+    Returns (printed value + unit, row context) so the governing row keeps its
+    provenance. Stage 6 rule 5: the governing row is the one with the largest
+    explicitly reported ratio -- never an assumed or hardcoded one. Returns
+    (MISSING_VALUE, "") when the report prints no such value.
+    """
+    field, context = _governing_field(fields, param_keywords)
+    return (_field_text(field) if field is not None else MISSING_VALUE), context
 
 
 # Parameter keywords per summary line, most specific first. A bare "thickness"
@@ -775,8 +805,8 @@ _NUMERIC_LINES = frozenset({
 _DIMENSIONLESS_LINES = frozenset({"helix_count"})
 
 
-def _first_numeric(fields, searches) -> str:
-    """First search hit whose value actually parses as a number."""
+def _first_numeric_field(fields, searches):
+    """The first search hit whose value actually parses as a number, or None."""
     for param_keyword, context_keyword in searches:
         for field in fields:
             parameter = field.get("Parameter", field.get("parameter", ""))
@@ -791,8 +821,14 @@ def _first_numeric(fields, searches) -> str:
                 continue
             if _leading_number(field.get("Value", field.get("value"))) is None:
                 continue
-            return _field_text(field)
-    return MISSING_VALUE
+            return field
+    return None
+
+
+def _first_numeric(fields, searches) -> str:
+    """First search hit whose value actually parses as a number."""
+    field = _first_numeric_field(fields, searches)
+    return _field_text(field) if field is not None else MISSING_VALUE
 
 
 def _format_measured(value: str, key: str) -> str:
@@ -905,6 +941,35 @@ _PROJECT_LINES = {
     "date": "date",
     "software": "software",
 }
+
+
+#: Result-ratio lines (section 4 of the clean summary): label + ratio key.
+SUMMARY_RATIO_LINES: tuple[tuple[str, str], ...] = (
+    ("R/GEO", "R/GEO"),
+    ("R/STR", "R/STR"),
+    ("R/CAP", "R/CAP"),
+)
+
+
+def resolve_summary_field(fields, key):
+    """The exact field the clean summary resolves for one line, with context.
+
+    Mirrors the numeric / text / governing-ratio paths in
+    :func:`generate_clean_summary`, so a caller that needs the UI's single
+    resolved value (the Executive Summary PDF) prints the same number the web
+    UI shows instead of every raw key-point side. Returns ``(field, context)``
+    where ``field`` is a field mapping, or ``(None, "")`` when the report
+    prints no such value.
+    """
+    if key in _RATIO_KEYWORDS:
+        return _governing_field(fields, _RATIO_KEYWORDS[key])
+    searches = _SUMMARY_SEARCHES.get(key, ())
+    if key in _NUMERIC_LINES:
+        field = _first_numeric_field(fields, searches)
+    else:
+        field = _first_smart_field(fields, searches)
+    context = _clean(field.get("Context", field.get("context"))) if field else ""
+    return field, context
 
 
 def generate_clean_summary(fields, project=None) -> str:

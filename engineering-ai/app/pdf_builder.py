@@ -39,6 +39,12 @@ see ``app/report/key_points.py``)::
     }
 
 Every part of that structure is treated as optional.
+
+When the payload also carries the raw ``fields`` the browser holds (the same
+list the web UI's clean summary is built from), the Load Summary and Key
+Results cells are resolved through :mod:`app.report.summary` so the PDF prints
+the same single value the UI shows, rather than every raw key-point side.
+Without ``fields`` the key points are rendered directly.
 """
 
 from __future__ import annotations
@@ -48,6 +54,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 from xml.sax.saxutils import escape
+
+from app.report.key_points import is_key_point_parameter
+from app.report.summary import (
+    SUMMARY_RATIO_LINES,
+    field_text as _summary_field_text,
+    resolve_summary_field,
+)
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
@@ -81,6 +94,17 @@ FOOTER_TEXT = (
 #: never silent: every cap that bites adds a "Notes and Flags" entry.
 MAX_LOAD_CASES = 12
 MAX_RATIOS = 12
+
+#: Per-conflict caps. A conflict with more distinct sides than
+#: :data:`CHART_CONFLICT_MIN_SIDES` is a chart/analysis data series (dozens of
+#: plotted coordinates), not a specification disagreement, and is omitted.
+#: :data:`MAX_CONFLICT_SIDES` caps how many sides an ordinary conflict prints.
+MAX_CONFLICT_SIDES = 6
+CHART_CONFLICT_MIN_SIDES = 10
+
+#: Row label used for a resolved load whose source states no load case (the
+#: context-free shear/moment lines the web UI also prints without a case).
+_GENERAL_LOAD_CASE = "General"
 
 _MARGIN = 12 * mm
 _BOTTOM_MARGIN = 17 * mm
@@ -361,6 +385,29 @@ _LOAD_COLUMNS: tuple[tuple[str, str], ...] = (
 
 _LOAD_HEADERS = ("Load case",) + tuple(title for title, _ in _LOAD_COLUMNS)
 
+#: Load column -> clean-summary line key (app.report.summary._SUMMARY_SEARCHES).
+_LOAD_SUMMARY_KEY = {
+    "load_compression": "compression",
+    "load_tension": "tension",
+    "load_shear": "shear",
+    "load_moment": "moment",
+}
+
+
+def _payload_fields(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """The raw fields the browser sent, if any, used for UI-aligned resolution."""
+    return [item for item in data.get("fields") or [] if isinstance(item, dict)]
+
+
+def _value_number(value: Any) -> float | None:
+    """First number of a value, or None (used to pick the governing ratio)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"[-+]?\d*\.?\d+", _clean(value))
+    return float(match.group(0)) if match else None
+
 
 @dataclass
 class Row:
@@ -423,7 +470,78 @@ def _pile_rows(data: dict[str, Any]) -> list[Row]:
 
 
 def _load_table(data: dict[str, Any]) -> tuple[list[list[str]], list[str], list[str]]:
-    """(cells, footnotes, notes) for the Load Summary table."""
+    """(cells, footnotes, notes) for the Load Summary table.
+
+    When the payload carries the raw ``fields`` the browser holds, each load
+    cell is resolved exactly as the web UI's clean summary resolves it (same
+    keyword, same context scoping), so the PDF and the UI print one value.
+    Otherwise the key points are read directly, as from a headless caller.
+    """
+    fields = _payload_fields(data)
+    if fields:
+        return _load_table_resolved(fields)
+    return _load_table_from_keypoints(data)
+
+
+def _load_table_resolved(
+    fields: list[dict[str, Any]]
+) -> tuple[list[list[str]], list[str], list[str]]:
+    """Load Summary built from the UI's resolved applied-load lines.
+
+    Every column is resolved to one value by ``resolve_summary_field`` and is
+    placed on the row of the load case that value belongs to; a line whose
+    source states no case (shear/moment) sits on the "General" row. A column
+    the UI also cannot resolve prints "Not found".
+    """
+    columns: list[tuple[str, str, str, str]] = []
+    for title, key in _LOAD_COLUMNS:
+        field, context = resolve_summary_field(fields, _LOAD_SUMMARY_KEY[key])
+        if field is None:
+            columns.append((title, "", _GENERAL_LOAD_CASE, ""))
+            continue
+        columns.append((
+            title,
+            _summary_field_text(field),
+            context or _GENERAL_LOAD_CASE,
+            _cite(field.get("source"), field.get("location")),
+        ))
+
+    order: list[str] = []
+    for _title, _text, context, _citation in columns:
+        if context not in order:
+            order.append(context)
+
+    notes: list[str] = []
+    body: list[list[str]] = []
+    footnotes: list[str] = []
+    for context in order:
+        cells = [context]
+        sources: list[str] = []
+        for title, text, column_context, citation in columns:
+            if column_context != context:
+                cells.append("")
+                continue
+            if not text:
+                cells.append(NOT_FOUND)
+                notes.append(
+                    f"{title} load: {NOT_FOUND}. The source report prints no such "
+                    "value."
+                )
+                continue
+            cells.append(text)
+            if citation and citation != NOT_FOUND:
+                sources.append(citation)
+        body.append(cells)
+        if sources:
+            footnotes.append(f"{context}: {', '.join(dict.fromkeys(sources))}")
+
+    return [list(_LOAD_HEADERS), *body], footnotes, notes
+
+
+def _load_table_from_keypoints(
+    data: dict[str, Any]
+) -> tuple[list[list[str]], list[str], list[str]]:
+    """(cells, footnotes, notes) for the Load Summary from key points."""
     records = _section(data, "loads")
     notes: list[str] = []
 
@@ -479,7 +597,70 @@ def _load_table(data: dict[str, Any]) -> tuple[list[list[str]], list[str], list[
 
 
 def _result_rows(data: dict[str, Any]) -> tuple[list[Row], list[str], str]:
-    """(rows, notes, governing-case sentence) for the Key Results section."""
+    """(rows, notes, governing-case sentence) for the Key Results section.
+
+    With the browser's raw ``fields`` present, the three ratio lines the web UI
+    reports (R/GEO, R/STR, R/CAP) are resolved the same way the UI resolves
+    them. Otherwise the key points are read directly.
+    """
+    fields = _payload_fields(data)
+    if fields:
+        return _result_rows_resolved(fields)
+    return _result_rows_from_keypoints(data)
+
+
+def _result_rows_resolved(
+    fields: list[dict[str, Any]]
+) -> tuple[list[Row], list[str], str]:
+    """Key Results from the UI's resolved ratio lines."""
+    notes: list[str] = []
+    rows: list[Row] = []
+    governing: tuple[float, str, str] | None = None
+    for label, key in SUMMARY_RATIO_LINES:
+        field, _context = resolve_summary_field(fields, key)
+        if field is None:
+            resolved = Resolved(
+                text=NOT_FOUND,
+                citation=NOT_FOUND,
+                status=_STATUS_MISSING,
+                notes=[
+                    f"{label}: {NOT_FOUND}. The source report prints no such ratio."
+                ],
+            )
+            rows.append(Row(label, resolved))
+            notes.extend(resolved.notes)
+            continue
+        text = _summary_field_text(field)
+        rows.append(
+            Row(
+                label,
+                Resolved(
+                    text=text,
+                    citation=_cite(field.get("source"), field.get("location")),
+                ),
+            )
+        )
+        number = _value_number(field.get("value"))
+        if number is not None and (governing is None or number > governing[0]):
+            governing = (number, label, text)
+
+    if governing is None:
+        sentence = (
+            "Governing ratio: Not found. The source report prints no plain ratio, "
+            "so no governing limit state could be identified."
+        )
+    else:
+        sentence = (
+            f"Governing ratio: {governing[1]} = {governing[2]} (largest reported "
+            "ratio)."
+        )
+    return rows, notes, sentence
+
+
+def _result_rows_from_keypoints(
+    data: dict[str, Any]
+) -> tuple[list[Row], list[str], str]:
+    """(rows, notes, governing-case sentence) from key points."""
     records = _section(data, "results")
     notes: list[str] = []
 
@@ -583,23 +764,48 @@ def _collect_notes(
     for item in _as_texts(_as_dict(data.get("key_points")).get("missing")):
         add(f"{item}: {NOT_FOUND}. This item was not present in the source report.")
 
-    # Disagreements the field extractor recorded, with both sides kept.
+    # Disagreements the field extractor recorded. Only conflicts that name a
+    # value the summary reports are listed: the extractor also flags every
+    # chart/soil-profile column, and those series are drawing data, not
+    # specification disagreements. Ordinary conflicts keep every side, capped.
+    chart_series: list[str] = []
     for conflict in conflicts:
         parameter = _clean(conflict.get("parameter")) or "Parameter"
+        if not is_key_point_parameter(parameter):
+            continue
         kind = _clean(conflict.get("kind")) or "value"
-        sides = []
+        sides: list[str] = []
+        seen_sides: set[str] = set()
         for record in _as_records(conflict.get("fields")):
             rendered, _unit, _numeric = _render_one(record)
-            sides.append(
-                f"{rendered} ({_cite(record.get('source'), record.get('location'))})"
-            )
-        if sides:
-            add(
-                f"{parameter}: the source report prints conflicting {kind}s "
-                f"({' vs '.join(sides)}). Both are shown; neither was selected."
-            )
-        else:
+            side = f"{rendered} ({_cite(record.get('source'), record.get('location'))})"
+            if side in seen_sides:
+                continue
+            seen_sides.add(side)
+            sides.append(side)
+        if len(sides) >= CHART_CONFLICT_MIN_SIDES:
+            chart_series.append(parameter)
+            continue
+        if not sides:
             add(f"{parameter}: flagged as a {kind} conflict in the source report.")
+            continue
+        shown = sides[:MAX_CONFLICT_SIDES]
+        hidden = len(sides) - len(shown)
+        listing = " vs ".join(shown)
+        if hidden:
+            listing += f" and {hidden} more"
+        add(
+            f"{parameter}: the source report prints conflicting {kind}s "
+            f"({listing}). Every side is shown; none was selected."
+        )
+
+    if chart_series:
+        names = ", ".join(dict.fromkeys(chart_series))
+        add(
+            f"Chart/analysis data series ({names}) report dozens of plotted "
+            "values, not a specification conflict; they are omitted here. See "
+            "the source figures."
+        )
 
     for warning in _as_texts(warnings):
         add(f"Extraction note: {warning}")

@@ -238,7 +238,7 @@
     <div class="rowbtns">
       <button class="ghost" id="pdfBtn">Download Executive Summary (PDF)</button>
       <span class="pill bad hidden" id="pdfError"></span>
-      <span class="muted" id="pdfNote">A one-page summary of the project details, pile sizes, loads and results. Anything the source report does not state is marked as not found rather than filled in.</span>
+      <span class="muted" id="pdfNote">A five-paragraph Executive Summary in the required engineering format. Anything the source report does not state is marked "not stated in the report" rather than filled in.</span>
     </div>
   </section>
 
@@ -269,6 +269,7 @@ let conflicts = [];
 let warnings = [];
 let keyPoints = null;     // {project, pile, loads, results, evaluation, references, missing}
 let cleanSummary = "";    // deterministic clean engineering summary (markdown)
+let documentText = "";    // raw report text, for standards/method detection
 let fileNames = [];
 
 const $ = (id) => document.getElementById(id);
@@ -353,6 +354,7 @@ function merge(a, b) { // combine fields/conflicts/warnings from two payloads
     conflicts: a.conflicts.concat(b.conflicts),
     warnings: a.warnings.concat(b.warnings),
     key_points: mergeKeyPoints(a.key_points, b.key_points),
+    document_text: [a.document_text, b.document_text].filter(Boolean).join("\n\n"),
     clean_engineering_summary: [a.clean_engineering_summary, b.clean_engineering_summary]
       .filter(Boolean).join("\n\n")
   };
@@ -396,6 +398,7 @@ function render(payload) {
   conflicts = payload.conflicts || [];
   warnings = payload.warnings || [];
   cleanSummary = payload.clean_engineering_summary || "";
+  documentText = payload.document_text || "";
   $("summary-output").innerHTML = renderSummary(cleanSummary);
 
   const files = new Set(payload.fields.map(f => f.source));
@@ -497,6 +500,7 @@ $("pdfBtn").addEventListener("click", async () => {
       // Send exactly what is on screen, including user corrections.
       body: JSON.stringify({
         clean_engineering_summary: cleanSummary,
+        document_text: documentText,
         conflicts,
         warnings,
         key_points: keyPoints,

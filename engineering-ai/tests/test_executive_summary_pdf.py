@@ -224,6 +224,104 @@ def test_populated_summary_fits_the_page_budget():
     assert _pages(build_executive_summary_pdf(_full_payload())) <= 2
 
 
+def _field(parameter, value, unit=None, context="", source="design_report.pdf",
+           location="page 3, table 2"):
+    return {
+        "parameter": parameter,
+        "value": value,
+        "unit": unit,
+        "context": context,
+        "section": "",
+        "source": source,
+        "location": location,
+        "raw": f"{parameter}: {value}",
+    }
+
+
+def _conflict(parameter, values, unit=""):
+    return {
+        "parameter": parameter,
+        "kind": "value",
+        "fields": [
+            _field(parameter, value, unit, location=f"page {index + 1}")
+            for index, value in enumerate(values)
+        ],
+        "detail": "ignored",
+    }
+
+
+def test_load_summary_resolves_cells_like_the_ui_when_fields_are_present():
+    data = _payload()
+    data["fields"] = [
+        _field("Axial load", 150.0, None, "Stage 0", location="page 7, table 2, row 4"),
+        _field("Axial load", 197.86, None, "Stage 1", location="page 8, table 2, row 5"),
+        _field("Shear", 10.0, "k", location="page 77"),
+        _field("Moment", 0.0, "k", location="page 77"),
+    ]
+
+    text = _text(build_executive_summary_pdf(data))
+
+    assert "Stage 0" in text and "Stage 1" in text and "General" in text
+    assert "150.0" in text and "197.86" in text
+    assert "10.0 k" in text and "0.0 k" in text
+    assert "page 7, table 2, row 4" in text
+    assert _pages(build_executive_summary_pdf(data)) <= 2
+
+
+def test_key_results_resolve_ratios_like_the_ui_when_fields_are_present():
+    data = _payload()
+    data["fields"] = [
+        _field("R/GEO", 0.907, None, location="page 12, table 1, row 2"),
+        _field("R/STR", 0.542, None, location="page 12, table 1, row 2"),
+        _field("R/CAP", 0.907, None, location="page 12, table 1, row 2"),
+    ]
+
+    text = _text(build_executive_summary_pdf(data))
+
+    for label in ("R/GEO", "R/STR", "R/CAP"):
+        assert label in text
+    assert "0.907" in text and "0.542" in text
+    assert "Governing ratio: R/GEO" in text
+
+
+def test_load_line_the_ui_cannot_resolve_prints_not_found():
+    data = _payload()
+    data["fields"] = [_field("Shear", 10.0, "k")]
+
+    text = _text(build_executive_summary_pdf(data))
+
+    assert "10.0 k" in text
+    assert NOT_FOUND in text
+
+
+def test_irrelevant_and_chart_conflicts_are_omitted_with_disclosure():
+    data = _full_payload()
+    data["conflicts"] = [
+        _conflict("El.", [1.0, 2.0]),
+        _conflict("Moment", list(range(12))),
+        _conflict("Yield strength", [345.0, 450.0]),
+    ]
+
+    notes = _text(build_executive_summary_pdf(data)).split("Notes and Flags", 1)[1]
+
+    assert "El." not in notes
+    assert "Chart/analysis data series (Moment)" in notes
+    assert "Yield strength" in notes
+    assert notes.count("conflicting values") == 1
+
+
+def test_conflict_sides_are_capped_and_the_cap_is_disclosed():
+    data = _full_payload()
+    data["conflicts"] = [
+        _conflict("Yield strength", [340, 350, 360, 370, 380, 390, 400])
+    ]
+
+    notes = _text(build_executive_summary_pdf(data)).split("Notes and Flags", 1)[1]
+
+    assert "and 1 more" in notes
+    assert "Every side is shown" in notes
+
+
 def test_long_load_case_list_is_capped_and_the_cap_is_disclosed():
     data = _full_payload()
     data["key_points"]["loads"] = [

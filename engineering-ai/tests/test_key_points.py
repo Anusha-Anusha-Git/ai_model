@@ -21,6 +21,8 @@ from app.extraction.field_extractor import extract_fields
 from app.report.key_points import (
     KeyPoint,
     KeyPointsResult,
+    _classify,
+    _usable_value,
     extract_key_points,
     main,
     render_key_points,
@@ -118,6 +120,69 @@ def test_yield_strength_with_parenthesised_qualifier():
     fy = find(kp.pile, "yield_strength")
     assert fy.value == pytest.approx(345.0)
     assert fy.unit == "MPa"
+
+
+def test_helixpile_abbreviation_columns():
+    """HelixPile prints Dp/tP/Fy/Numbe as column headers (Kinder Morgan report)."""
+    headers = ["Section", "Fy", "Fu", "Dp", "tP", "Ap", "Numbe"]
+    units = ["Name", "(ksi)", "(ksi)", "(in)", "(in)", "(in^2)", "Name"]
+    row = ["5: 7.63 x 0.375 x 80", "80", "90", "7.63", "0.38", "6.1", "3"]
+    table = Table(location="page 2, table 1", headers=headers, rows=[units, row])
+    doc = ExtractedDocument(path=Path("helixpile.pdf"), file_type="pdf", tables=[table])
+    kp = extract_key_points(extract_fields(doc), doc)
+
+    assert find(kp.pile, "pile_diameter").value == pytest.approx(7.63)
+    assert find(kp.pile, "pile_thickness").value == pytest.approx(0.38)
+    assert find(kp.pile, "yield_strength").value == pytest.approx(80.0)
+    assert find(kp.pile, "helix_count").value == pytest.approx(3.0)
+    # the unit-header row ("(in)", "(ksi)", "Name") is never promoted to a value
+    assert all(not isinstance(p.value, str) for p in kp.pile)
+
+
+def test_helix_diameter_from_dhel_column():
+    headers = ["Plate", "Dhel", "Shel", "Ahel", "Qhel"]
+    units = ["Name", "(in)", "(in^2)", "(in^2)", "(k)"]
+    row = ["1", "24", "452", "452", "60"]
+    table = Table(location="page 3, table 1", headers=headers, rows=[units, row])
+    doc = ExtractedDocument(path=Path("helixpile.pdf"), file_type="pdf", tables=[table])
+    kp = extract_key_points(extract_fields(doc), doc)
+    assert find(kp.pile, "helix_dia").value == pytest.approx(24.0)
+    # Qhel is a helix capacity, not a pile spec / load
+    assert all(p.key != "load_compression" for p in kp.loads)
+
+
+def test_capacity_and_ratio_labels_are_not_applied_loads():
+    assert _classify("R/CAP", "")[0] == "result_ratio"
+    assert _classify("R/STR", "")[0] == "result_ratio"
+    assert _classify("R/GEO", "")[0] == "result_ratio"
+    assert _classify("LOAD/CAP", "")[0] == "result_ratio"
+    assert _classify("Qult", "") is None
+    assert _classify("CAP. compressi", "") is None
+    assert _classify("Comp.Ult", "") is None
+
+
+def test_drawing_data_rows_are_not_classified():
+    for label in (
+        "Lateral soil data points along pile Design section",
+        "Lateral analysis results points along pile Design section",
+        "Stress-strength points along pile Design section",
+    ):
+        assert _classify(label, "") is None
+
+
+def test_lat_force_fy_is_not_yield_strength():
+    cls = _classify("Lat. Force Fy", "")
+    assert cls is None or cls[0] != "yield_strength"
+
+
+def test_header_labels_are_not_usable_values():
+    assert not _usable_value("(ksi)")
+    assert not _usable_value("Cylinder")
+    assert not _usable_value("Stage 0")
+    assert not _usable_value("")
+    assert not _usable_value(None)
+    assert _usable_value(7.63)
+    assert _usable_value(0)
 
 
 # --------------------------------------------------------------------------

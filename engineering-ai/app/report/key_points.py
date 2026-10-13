@@ -122,6 +122,64 @@ class KeyPointsResult:
 # --------------------------------------------------------------------------
 
 
+#: Table labels that HelixPile/DeepFND print as data cells: unit headers,
+#: unit fragments, and row names. A real printed measurement always carries a
+#: digit and is never one of these, so they are rejected as values.
+_LABEL_VALUES = frozenset({
+    "name", "number", "helix", "stage", "stage 0", "stage 1", "critical",
+    "ratio", "structural", "geotech", "warning", "active", "yes", "no",
+    "response", "elastic", "cylinder", "plate", "tip", "design", "ultimate",
+    "value", "unit", "n/a", "none",
+})
+
+
+def _usable_value(value) -> bool:
+    """False for a header label or unit fragment mistaken for a reading.
+
+    The field extractor keeps every cell of an engineering table, including the
+    unit-header row ("(ksi)", "(in)", "Cylinder", "Stage 0"). Those are labels,
+    not measurements, and must never be promoted to a key-point value.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if text[0] in "([":
+        return False  # unit fragment lifted from a header row, e.g. "(ksi)"
+    if not re.search(r"\d", text):
+        return False  # a printed measurement always contains a digit
+    return text.lower().strip(" .:") not in _LABEL_VALUES
+
+
+#: Tokens marking a cell as a capacity or ultimate value. Capacities are never
+#: reclassified as applied loads.
+_CAPACITY_TOKENS = ("qult", "qhel", "qy", "cap", "capac")
+
+
+def _is_capacity_parameter(n: str) -> bool:
+    return any(tok in n for tok in _CAPACITY_TOKENS) or n.endswith("ult")
+
+
+def _is_ratio_parameter(n: str) -> bool:
+    if ("ratio" in n or "demand" in n or "utilization" in n or n.endswith("ur")
+            or n in ("dc", "adc", "dcratio")):
+        return True
+    # HelixPile/DeepFND ratio columns: R/CAP, R/STR, R/GEO, LOAD/CAP.
+    return n in ("rcap", "rstr", "rgeo") or n.startswith("loadcap")
+
+
+#: Chart/drawing-data row labels, e.g. "Lateral soil data points along pile
+#: Design section". These name a plotted point, not an applied load or a spec.
+_DRAWING_PARAM_RE = re.compile(
+    r"\bpoints?\s+along\b|\bdata\s+points?\b|\bresults?\s+points?\b"
+    r"|\banalysis\s+results\b",
+    re.I,
+)
+
+
 def _classify(parameter: str, context: str) -> tuple[str, str, str] | None:
     """Return (key, label, category) for a field, or None if not a key point."""
     # a trailing parenthesised/bracketed unit ("Diameter (mm)") is not part
@@ -131,48 +189,59 @@ def _classify(parameter: str, context: str) -> tuple[str, str, str] | None:
     c = _compact(context)
     if not n:
         return None
-
-    # --- helix geometry (checked first: names contain "dia"/"no") ---------
-    if "helix" in n:
-        if "dia" in n or n.endswith("dia"):
-            numbered = re.search(r"helixdia(?P<num>[1-5])", n)
-            if numbered:
-                num = numbered.group("num")
-                return f"helix_dia_{num}", f"Helix diameter {num}", "pile"
-            return "helix_dia", "Helix diameter", "pile"
-        if any(tok in n for tok in ("no", "num", "count", "qty")):
-            return "helix_count", "Number of helixes", "pile"
+    if _DRAWING_PARAM_RE.search(parameter):
         return None
 
-    # --- yield strength ----------------------------------------------------
-    if n == "fy" or n.endswith("fy") or "yield" in n:
+    pile_like = "pile" in c or c.startswith("hp") or "pipe" in c
+
+    # --- helix geometry (HelixPile prints "Dhel" / "Numbe") ---------------
+    if n == "dhel" or (("helix" in n or "plate" in n) and "dia" in n):
+        numbered = re.search(r"helixdia(?P<num>[1-5])", n)
+        if numbered:
+            num = numbered.group("num")
+            return f"helix_dia_{num}", f"Helix diameter {num}", "pile"
+        return "helix_dia", "Helix diameter", "pile"
+    if n == "numbe" or (
+        "helix" in n and any(tok in n for tok in ("no", "num", "count", "qty"))
+    ):
+        return "helix_count", "Number of helixes", "pile"
+
+    # --- yield strength (HelixPile prints "Fy"; "Lat. Force Fy" is not Fy) --
+    if n == "fy" or "yield" in n:
         return "yield_strength", "Yield strength (Fy)", "pile"
 
     # --- ratios (checked before bare "moment"/"shear" word matches) --------
-    if ("ratio" in n or "demand" in n or "utilization" in n or n.endswith("ur")
-            or n in ("dc", "adc", "dcratio")):
+    if _is_ratio_parameter(n):
         return "result_ratio", "D/C ratio", "results"
 
+    # --- capacities are strength/capacity data, never applied loads --------
+    if _is_capacity_parameter(n):
+        return None
+
     # --- pile geometry ------------------------------------------------------
-    pile_like = "pile" in c or c.startswith("hp") or "pipe" in c
-    if "pile" in n and ("dia" in n or "section" in n or n.endswith("od")):
+    if n in ("dp", "od", "outerdia", "outsidediameter", "diameterod"):
         return "pile_diameter", "Pile diameter", "pile"
-    if n in ("od", "outerdia", "outsidediameter", "diameterod"):
+    if "pile" in n and "dia" in n:
         return "pile_diameter", "Pile diameter", "pile"
     if n == "diameter" and pile_like:
         return "pile_diameter", "Pile diameter", "pile"
-    if ("thick" in n and ("pile" in n or "wall" in n or "pipe" in n or "section" in n
-                          or pile_like)
-            or n in ("tp", "t") and pile_like):
+    # "Pile section: 324 mm OD" is a pile line, but a longer title that merely
+    # mentions a pile section ("Helical pile section", or a "...points along
+    # pile Design section" chart row) is not a diameter.
+    if "pile" in n and "section" in n and len(n) <= 16:
+        return "pile_diameter", "Pile diameter", "pile"
+    if n == "tp" or (n == "t" and pile_like) or (
+        "thick" in n and ("pile" in n or "wall" in n or "pipe" in n
+                          or "section" in n or pile_like)
+    ):
         return "pile_thickness", "Pile wall thickness", "pile"
-    if ("pile" in n and "length" in n or "embed" in n
-            or n == "length" and pile_like or n == "l" and pile_like):
-        return "pile_length", "Pile length", "pile"
-    if "section" in n and "length" in n:
+    if ("pile" in n and "length" in n) or ("section" in n and "length" in n) or (
+        "embed" in n
+    ) or ((n in ("length", "l")) and pile_like):
         return "pile_length", "Pile length", "pile"
 
     # --- loads --------------------------------------------------------------
-    if "compress" in n:
+    if "compress" in n or n in ("axial", "axialload", "axialforce"):
         return "load_compression", "Compression load", "loads"
     if "tension" in n or "uplift" in n or "pullout" in n:
         return "load_tension", "Tension load", "loads"
@@ -182,6 +251,20 @@ def _classify(parameter: str, context: str) -> tuple[str, str, str] | None:
         return "load_moment", "Moment", "loads"
 
     return None
+
+
+def is_key_point_parameter(parameter: str, context: str = "") -> bool:
+    """True when a parameter name classifies to a pile/load/result key point.
+
+    The field extractor records a "conflict" for every parameter column whose
+    values disagree, including the hundreds of coordinate/soil-profile columns
+    of the report's chart tables. Those are drawing data, not engineering
+    fields. The Executive Summary PDF uses this to keep only conflicts that
+    name a value it reports.
+    """
+    if not isinstance(parameter, str):
+        return False
+    return _classify(parameter, context) is not None
 
 
 _RATIO_CTX_RE = re.compile(
@@ -238,6 +321,8 @@ def _fields_to_keypoints(fields) -> tuple[list[KeyPoint], list[KeyPoint], list[K
     for f in fields:
         cls = _classify(f.parameter, f.context)
         if cls is None:
+            continue
+        if not _usable_value(f.value):
             continue
         key, label, category = cls
         if key == "result_ratio":
@@ -788,6 +873,26 @@ def _extract_software(documents: list[ExtractedDocument]) -> list[KeyPoint]:
     return found
 
 
+def _clean_fields(fields, docs: list[ExtractedDocument]):
+    """Drop graph/analysis-table noise before key-point classification.
+
+    The field extractor keeps every numeric cell, including the hundreds of
+    coordinate rows of moment/shear/settlement chart tables. Those are drawing
+    data, not engineering fields, and the report summary already discards them
+    via ``summary.filter_noise_for_llm``. Reuse that exact filter so key points
+    agree with the web UI. Imported lazily: ``summary`` imports this module.
+    """
+    try:
+        from app.report.summary import filter_noise_for_llm
+    except Exception:  # pragma: no cover - defensive: never lose all fields
+        return list(fields)
+    tables = [t for doc in docs for t in getattr(doc, "tables", []) or []]
+    try:
+        return list(filter_noise_for_llm(list(fields), tables))
+    except Exception:  # pragma: no cover - defensive
+        return list(fields)
+
+
 def extract_key_points(result: ExtractionResult,
                        documents: ExtractedDocument | list[ExtractedDocument]) -> KeyPointsResult:
     """Structured key-point summary from an ExtractionResult + Stage-2 docs."""
@@ -798,7 +903,7 @@ def extract_key_points(result: ExtractionResult,
     if not any(p.key == "software" for p in kp.project):
         kp.project.extend(_extract_software(docs))
 
-    pile, loads, results = _fields_to_keypoints(result.fields)
+    pile, loads, results = _fields_to_keypoints(_clean_fields(result.fields, docs))
     prose = _prose_values(docs)
 
     loads = _merge(loads, [p for p in prose if p.category == "loads"])

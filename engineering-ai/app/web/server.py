@@ -22,7 +22,8 @@ from pathlib import Path
 
 from app.extraction.document_loader import ExtractedDocument, TextChunk, load_document
 from app.extraction.field_extractor import extract_fields
-from app.pdf_builder import build_executive_summary_pdf, executive_summary_filename
+from app.pdf_builder import executive_summary_filename
+from app.report.executive_summary import build_executive_summary_narrative_pdf
 from app.report.key_points import extract_key_points
 from app.report.pdf_report import ExtractionPayload, generate_pdf
 from app.report.summary import generate_clean_summary
@@ -122,6 +123,7 @@ def _run_extraction(documents: list[ExtractedDocument]) -> dict:
     payload["clean_engineering_summary"] = build_clean_summary(
         payload.get("fields", []), key_points.get("project", [])
     )
+    payload["document_text"] = "\n\n".join(doc.full_text() for doc in documents)[:60_000]
     return payload
 
 
@@ -176,7 +178,7 @@ class _Handler(BaseHTTPRequestHandler):
         raise ValueError(f"unknown route {route}")
 
     def _api_executive_summary_pdf(self) -> tuple[bytes, str]:
-        """Render the 1-2 page Executive Summary PDF.
+        """Render the five-paragraph Executive Summary PDF.
 
         Stateless like every other route here: the browser sends the data it
         already holds, so any value corrected on screen is the value printed,
@@ -185,7 +187,7 @@ class _Handler(BaseHTTPRequestHandler):
         data = json.loads(_read_body(self).decode("utf-8") or "{}")
         if not isinstance(data, dict):
             raise ValueError("expected a JSON object")
-        body = build_executive_summary_pdf(data)
+        body = build_executive_summary_narrative_pdf(data)
         return body, executive_summary_filename(data)
 
     def _api_pdf(self) -> tuple[bytes, str]:
