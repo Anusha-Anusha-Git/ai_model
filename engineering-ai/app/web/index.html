@@ -80,6 +80,34 @@
     outline: none;
   }
   textarea:focus { border-color: var(--sky-500); box-shadow: 0 0 0 3px var(--sky-200); }
+
+  /* ---- project inputs (user-supplied, not extracted) ---- */
+  .cfg {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 10px 16px;
+    margin-top: 14px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--sky-50);
+  }
+  .cfg h4 { margin: 0; grid-column: 1 / -1; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .cfg label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .cfg input[type=text] {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--ink);
+    background: #fff;
+    outline: none;
+  }
+  .cfg input[type=text]:focus { border-color: var(--sky-500); box-shadow: 0 0 0 3px var(--sky-200); }
+  .cfg .flag { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); align-self: end; padding-bottom: 6px; }
+  .cfg .hint { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); }
   .rowbtns { display: flex; gap: 10px; margin-top: 14px; align-items: center; flex-wrap: wrap; }
   button {
     border: none;
@@ -217,10 +245,62 @@
     <p class="muted" style="margin:16px 0 6px;">…or paste engineering text directly:</p>
     <textarea id="textArea" placeholder="Example:&#10;Required axial capacity (ULS): compression 980 kN, tension 610 kN.&#10;Pile section: 324 mm OD, wall thickness 12.7 mm, Fy = 450 MPa."></textarea>
 
+    <div class="cfg" id="cfgBox">
+      <h4>Project inputs — user-supplied (never extracted, never calculated)</h4>
+      <div>
+        <label for="cfgSystem">Foundation system descriptor</label>
+        <input type="text" id="cfgSystem" placeholder="e.g. combined bucket pile-helical pile" autocomplete="off">
+      </div>
+      <div>
+        <label for="cfgCorrosion">Corrosion category</label>
+        <input type="text" id="cfgCorrosion" placeholder="e.g. non-to-mildly aggressive" autocomplete="off">
+      </div>
+      <label class="flag"><input type="checkbox" id="cfgReviewed"> Reviewed by engineer</label>
+      <label class="flag"><input type="checkbox" id="cfgVerified"> Installation verified</label>
+      <div class="hint">Optional. Empty descriptor renders "foundation system", an empty category is omitted, and until both boxes are ticked the summary asks for torque verification and engineer review before acceptance. Prefilled from <code>project_inputs.json</code> when present.</div>
+    </div>
+
     <div class="rowbtns">
       <button class="primary" id="runBtn">Extract fields</button>
       <button class="ghost" id="clearBtn">Clear</button>
       <span class="muted" id="status"></span>
+    </div>
+
+    <div class="cfg" id="coverBox" style="margin-top:14px">
+      <h4>Cover page — printed on the PDF cover (optional)</h4>
+      <div>
+        <label for="cover_structure">Structure name (third title line)</label>
+        <input type="text" id="cover_structure" value="(PERIMETER A)" placeholder="e.g. PEMB (PERIMETER A)" autocomplete="off">
+      </div>
+      <div>
+        <label for="cover_project">Project name</label>
+        <input type="text" id="cover_project" placeholder="e.g. ROYSE DATA CENTER PROJECT" autocomplete="off">
+      </div>
+      <div>
+        <label for="cover_date">Date</label>
+        <input type="text" id="cover_date" placeholder="e.g. AUG 27, 2026" autocomplete="off">
+      </div>
+      <div>
+        <label for="cover_origin">Originated by</label>
+        <input type="text" id="cover_origin" placeholder="e.g. PP" autocomplete="off">
+      </div>
+      <div>
+        <label for="cover_check">Checked by</label>
+        <input type="text" id="cover_check" placeholder="e.g. SP" autocomplete="off">
+      </div>
+      <div>
+        <label for="cover_approve">Approved by</label>
+        <input type="text" id="cover_approve" placeholder="e.g. SP" autocomplete="off">
+      </div>
+      <div style="grid-column:1/-1">
+        <label for="cover_address">Project address / location</label>
+        <input type="text" id="cover_address" placeholder="e.g. 4853 County Road 2656, Royse City, TX, 75189" autocomplete="off">
+      </div>
+      <div style="grid-column:1/-1">
+        <label for="cover_company_address">Company address (under the logo)</label>
+        <input type="text" id="cover_company_address" value="202 S Dixon St, Callisburg, TX 76240, United States" autocomplete="off">
+      </div>
+      <div class="hint">These values print on the cover page exactly as entered. Clear a field to leave it blank; the date starts at today.</div>
     </div>
   </section>
 
@@ -238,7 +318,7 @@
     <div class="rowbtns">
       <button class="ghost" id="pdfBtn">Download Executive Summary (PDF)</button>
       <span class="pill bad hidden" id="pdfError"></span>
-      <span class="muted" id="pdfNote">A five-paragraph Executive Summary in the required engineering format. Anything the source report does not state is marked "not stated in the report" rather than filled in.</span>
+      <span class="muted" id="pdfNote">A five-paragraph Executive Summary in the required engineering format. Anything the source report does not state is marked "Not specified" rather than filled in.</span>
     </div>
   </section>
 
@@ -271,6 +351,8 @@ let keyPoints = null;     // {project, pile, loads, results, evaluation, referen
 let cleanSummary = "";    // deterministic clean engineering summary (markdown)
 let documentText = "";    // raw report text, for standards/method detection
 let fileNames = [];
+let projectInputs = {};   // user-supplied config: system_descriptor, corrosion_category, review flags
+let cfgDirty = false;     // true once the form is edited, so blanks are never a silent override
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
@@ -306,6 +388,36 @@ $("clearBtn").addEventListener("click", () => {
   fields = []; conflicts = []; warnings = []; keyPoints = null;
 });
 
+/* ---------- project inputs (user-supplied, not extracted) ---------- */
+function readCfg() {
+  return {
+    system_descriptor: $("cfgSystem").value.trim(),
+    corrosion_category: $("cfgCorrosion").value.trim(),
+    reviewed_by_engineer: $("cfgReviewed").checked,
+    installation_verified: $("cfgVerified").checked
+  };
+}
+
+function showCfg(inputs) {
+  inputs = inputs || {};
+  $("cfgSystem").value = inputs.system_descriptor || "";
+  $("cfgCorrosion").value = inputs.corrosion_category || "";
+  $("cfgReviewed").checked = !!inputs.reviewed_by_engineer;
+  $("cfgVerified").checked = !!inputs.installation_verified;
+}
+
+/* Only a touched form is sent, so a blank form keeps the server-side
+   project_inputs.json defaults instead of silently blanking them out. */
+function cfgOverride() {
+  return cfgDirty ? readCfg() : null;
+}
+
+["cfgSystem", "cfgCorrosion", "cfgReviewed", "cfgVerified"].forEach(id => {
+  const mark = () => { cfgDirty = true; projectInputs = readCfg(); };
+  $(id).addEventListener("input", mark);
+  $(id).addEventListener("change", mark);
+});
+
 /* ---------- extract ---------- */
 $("runBtn").addEventListener("click", run);
 $("textArea").addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run(); });
@@ -319,15 +431,17 @@ async function run() {
   $("status").innerHTML = `<span class="spin"></span>Extracting…`;
   try {
     let payload;
+    const pi = cfgOverride();
     if (files.length > 0) {
       const fd = new FormData();
       files.forEach(f => fd.append("file", f));
+      if (pi) fd.append("project_inputs", JSON.stringify(pi));
       payload = await fetch("/api/extract", { method: "POST", body: fd }).then(r => r.json());
       if (text) { // paste + files: run paste separately and merge sources
         const p = await fetch("/api/extract", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text })
+          body: JSON.stringify({ text, project_inputs: pi })
         }).then(r => r.json());
         payload = merge(payload, p);
       }
@@ -335,7 +449,7 @@ async function run() {
       payload = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({ text, project_inputs: pi })
       }).then(r => r.json());
     }
     if (payload.error) throw new Error(payload.error);
@@ -356,7 +470,9 @@ function merge(a, b) { // combine fields/conflicts/warnings from two payloads
     key_points: mergeKeyPoints(a.key_points, b.key_points),
     document_text: [a.document_text, b.document_text].filter(Boolean).join("\n\n"),
     clean_engineering_summary: [a.clean_engineering_summary, b.clean_engineering_summary]
-      .filter(Boolean).join("\n\n")
+      .filter(Boolean).join("\n\n"),
+    project_inputs: a.project_inputs || b.project_inputs,
+    provenance: a.provenance || b.provenance
   };
 }
 
@@ -399,6 +515,9 @@ function render(payload) {
   warnings = payload.warnings || [];
   cleanSummary = payload.clean_engineering_summary || "";
   documentText = payload.document_text || "";
+  projectInputs = payload.project_inputs || {};
+  showCfg(projectInputs);
+  cfgDirty = false;
   $("summary-output").innerHTML = renderSummary(cleanSummary);
 
   const files = new Set(payload.fields.map(f => f.source));
@@ -484,6 +603,30 @@ function renderWarnings() {
   list.innerHTML = warnings.map(w => `<div class="warn">${esc(w)}</div>`).join("");
 }
 
+/* ---------- cover page fields (user-supplied) ---------- */
+function readCoverPage() {
+  return {
+    structure_name: $("cover_structure").value.trim(),
+    project_name: $("cover_project").value.trim(),
+    project_address: $("cover_address").value.trim(),
+    company_address: $("cover_company_address").value.trim(),
+    date: $("cover_date").value.trim(),
+    originated_by: $("cover_origin").value.trim(),
+    checked_by: $("cover_check").value.trim(),
+    approved_by: $("cover_approve").value.trim()
+  };
+}
+
+/* Default the cover date to today, but keep it an ordinary editable field:
+   whatever the engineer types here is what the cover page prints. */
+(function prefillCoverDate() {
+  const months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const now = new Date();
+  $("cover_date").value =
+    months[now.getMonth()] + " " + String(now.getDate()).padStart(2, "0") + ", " + now.getFullYear();
+})();
+
 /* ---------- download: Executive Summary PDF ---------- */
 $("pdfBtn").addEventListener("click", async () => {
   const note = $("pdfNote");
@@ -504,6 +647,8 @@ $("pdfBtn").addEventListener("click", async () => {
         conflicts,
         warnings,
         key_points: keyPoints,
+        project_inputs: cfgDirty ? readCfg() : projectInputs,
+        cover_page: readCoverPage(),
         fields: fields.map(f => ({
           parameter: f.parameter,
           context: f.context,

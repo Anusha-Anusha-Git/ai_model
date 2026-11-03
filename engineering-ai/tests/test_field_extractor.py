@@ -202,6 +202,31 @@ def test_non_numeric_cell_kept_as_raw_and_warned():
     assert any("not a number" in w for w in result.warnings)
 
 
+@pytest.mark.parametrize("placeholder", ["N/A", "n/a", "-", "--", "\u2014"])
+def test_not_applicable_placeholder_is_kept_but_not_warned(placeholder):
+    table = Table(
+        location="page 4, table 1",
+        headers=["Pile", "Nspt"],
+        rows=[["HP9", placeholder]],
+    )
+    doc = ExtractedDocument(path=Path("draft.pdf"), file_type="pdf", tables=[table])
+    result = extract_fields(doc)
+    assert field_by(result, "Nspt", context="HP9").value == placeholder
+    assert not any("not a number" in w for w in result.warnings)
+
+
+def test_value_misread_as_numeric_header_is_not_warned():
+    # A two-column settings table: "8 k" is the value, not a parameter name.
+    table = Table(
+        location="page 6, table 1",
+        headers=["Lateral load", "8 k"],
+        rows=[["Pile section", "Elastic"], ["Cyclic loading", "No"]],
+    )
+    doc = ExtractedDocument(path=Path("draft.pdf"), file_type="pdf", tables=[table])
+    result = extract_fields(doc)
+    assert not any("not a number" in w for w in result.warnings)
+
+
 def test_formula_cell_skipped_with_warning_not_guessed():
     table = Table(
         location="sheet: Loads",

@@ -2,9 +2,9 @@
 
 Locally deployable AI application for engineering and structural/manufacturing
 use. Reads engineering project documents, extracts structured data with full
-traceability, retrieves engineering references via RAG, and runs deterministic
-engineering calculations. **AI output is never** certified or approved
-engineering work.
+traceability, and produces review-oriented summaries and PDF reports. RAG
+retrieval and independent recalculation are not part of the current build.
+**AI output is never** certified or approved engineering work.
 
 ## Hard constraints (all stages)
 
@@ -147,8 +147,8 @@ Rules enforced by the extractor:
   value, and blank/unreadable content produce a warning, never a guess.
 
 Note: `SUBMISSION DATE: 2026-09-23` style dates parse deterministically as the
-leading number (`2026`); dates are not engineering fields and Stage 3 deals
-with unit/date semantics.
+leading number (`2026`); dates are not engineering fields, and unit/date
+semantics are not handled in this build.
 
 ### Stage 2b interactive UI (pastel blue)
 
@@ -164,6 +164,24 @@ Results show the **clean engineering summary** (project / pile specs / factored
 loads / ratios / settlement & lateral / durability / evaluation), summary chips,
 flagged conflicts, warnings, and the key-point card. The server is purely
 deterministic — Stage 2/2b extraction runs server-side, no LLM guesses.
+
+#### Optional targeted AI fallback (off by default)
+
+When a required **numeric** key point is missing, a flag-gated helper can ask
+the local model for a value from **one relevant excerpt only** (a table row or
+a text line, never the whole file):
+
+```bash
+ENGAI_AI_FALLBACK=1 python -m app.web.server --port 8000
+```
+
+The deterministic result is never modified. Suggestions appear separately in
+`ai_suggestions`, are labelled `AI-generated`, and remain unverified. A
+suggestion is discarded unless its quote occurs in the excerpt and the number
+occurs in that quote. Text fields (project name, client, date) are not
+attempted: a number check cannot validate them. Conflicts are **not** sent to
+the model — the extractor's "flag, never resolve" rule still applies. With the
+flag off, no model runtime is imported and the response is unchanged.
 
 `clean_engineering_summary` is built by `generate_clean_summary()` in
 `app/report/summary.py` — pure keyword lookup over the extracted fields:
@@ -241,18 +259,23 @@ statistics are written to standard error.
 
 ## Stage roadmap
 
+The current build is intentionally limited to the deterministic extraction and
+report flow: Stages 1, 2, 2b, 2c, 6, and the minimal Stage 10 web UI, plus the
+appended verification table. The remaining stages are deferred or out of scope
+for this build; they are not a claim of unfinished delivery.
+
 | # | Stage | Status |
 |---|-------|--------|
 | 1 | Local model: Qwen2.5-1.5B-Instruct inference | Done |
 | 2 | Document ingestion: PDF/DOCX/XLSX/CSV/TXT | Done |
 | 2b | Field extraction: raw text → structured project/pile/load fields | Done |
 | 2c | Report key-point summary + engineering evaluation + references | Done |
-| 3 | Data validation: missing/invalid/conflicting/unit-mismatch checks | |
-| 4 | Engineering references + RAG: chunk → embed → FAISS → retrieve | |
-| 5 | Deterministic calculations: Python modules for capacities/ratios | |
-| 6 | Engineering report generation | Done: strict nine-section summary |
-| 7 | Evaluation: test set, accuracy/hallucination metrics | |
-| 8 | LoRA fine-tuning (only if Stage 7 shows it's needed) | |
-| 9 | FastAPI endpoints: upload/extraction/calculation/RAG/report | |
-| 10 | Frontend: pastel-blue, review/correct extracted values, results | (2b UI: minimal web UI done) |
-| 11 | Deployment: Docker, resource requirements, deployment docs | |
+| 3 | Data validation: missing/invalid/conflicting/unit-mismatch checks | Partial: ad-hoc extraction checks only; formal layer deferred |
+| 4 | Engineering references + RAG: chunk → embed → FAISS → retrieve | Out of scope |
+| 5 | Deterministic calculations: Python modules for capacities/ratios | Out of scope by design: report values are never recalculated |
+| 6 | Engineering report generation | Done: strict nine-section summary + verification table |
+| 7 | Evaluation: test set, accuracy/hallucination metrics | Deferred; regression tests only |
+| 8 | LoRA fine-tuning (only if Stage 7 shows it's needed) | Out of scope unless Stage 7 is revived |
+| 9 | FastAPI endpoints: upload/extraction/calculation/RAG/report | Out of scope: local stdlib server is the supported interface |
+| 10 | Frontend: pastel-blue, review/correct extracted values, results | Partial: minimal Stage 2b web UI done |
+| 11 | Deployment: Docker, resource requirements, deployment docs | Out of scope: local venv workflow only |

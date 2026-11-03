@@ -30,7 +30,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.extraction.document_loader import ExtractedDocument, load_many
-from app.extraction.field_extractor import ExtractionResult, extract_fields, split_value_unit
+from app.extraction.field_extractor import (
+    ExtractionResult,
+    _split_unit_row,
+    extract_fields,
+    parse_section,
+    split_value_unit,
+)
 
 # a number, validated by float() (same shape as Stage 2b)
 _NUMBER_RE = re.compile(r"^[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?$")
@@ -156,11 +162,20 @@ def _usable_value(value) -> bool:
 
 #: Tokens marking a cell as a capacity or ultimate value. Capacities are never
 #: reclassified as applied loads.
-_CAPACITY_TOKENS = ("qult", "qhel", "qy", "cap", "capac")
+_CAPACITY_TOKENS = ("qult", "qhel", "qy", "cap", "capac", "resist")
 
 
 def _is_capacity_parameter(n: str) -> bool:
-    return any(tok in n for tok in _CAPACITY_TOKENS) or n.endswith("ult")
+    if any(tok in n for tok in _CAPACITY_TOKENS):
+        return True
+    # HelixPile's "Plate Tension (k)" / "Cylinder Tension (k)" columns are
+    # ultimate member capacities, not applied loads, but their labels carry no
+    # capacity token of their own.
+    if "plate" in n and ("tension" in n or "pullout" in n):
+        return True
+    if "cylinder" in n and ("tension" in n or "comp" in n):
+        return True
+    return False or n.endswith("ult")
 
 
 def _is_ratio_parameter(n: str) -> bool:
@@ -178,6 +193,48 @@ _DRAWING_PARAM_RE = re.compile(
     r"|\banalysis\s+results\b",
     re.I,
 )
+
+#: Load/force nouns. A word that matches one of these is only an applied load
+#: when it is not a capacity, a section property, or an interaction-diagram
+#: abbreviation (see :data:`_LOAD_QUALIFIERS`).
+_LOAD_KEYWORD_RE = re.compile(
+    r"(axial|compress|tension|uplift|pullout|shear|lateral|moment|bending|force)"
+)
+
+#: Words that legitimately qualify a load ("max compression load", "net
+#: uplift"). Any *other* short alphabetic token in front of a load noun is an
+#: interaction-diagram abbreviation ("D.Tension", "M D.Comp", "ULT.TENSION"),
+#: and a dotted prefix is likewise an abbreviation, never an applied load.
+_LOAD_QUALIFIERS = {
+    "max", "min", "avg", "ave", "net", "sum", "all", "tot", "total",
+    "top", "bot", "mid", "gov", "serv", "uls", "sls", "str", "eq",
+}
+
+
+def _is_interaction_label(stripped: str) -> bool:
+    """True for an abbreviated interaction-diagram label ("D.Tension",
+    "M D.Comp", "Q PL.1ULT.Tension", "ULT.TENSION").
+
+    A dotted prefix, or a very short alphabetic prefix in front of a load noun
+    that is not a normal qualifier such as "max", marks a plotted curve rather
+    than an applied load.
+    """
+    dotted = re.sub(r"[^a-z0-9.]+", " ", stripped.lower())
+    kw = _LOAD_KEYWORD_RE.search(dotted)
+    if not kw:
+        return False
+    prefix = dotted[: kw.start()].strip()
+    compact_prefix = prefix.replace(" ", "")
+    return bool(compact_prefix) and (
+        "." in prefix
+        or (len(compact_prefix) <= 3 and compact_prefix not in _LOAD_QUALIFIERS)
+    )
+
+
+    return bool(compact_prefix) and (
+        "." in prefix
+        or (len(compact_prefix) <= 3 and compact_prefix not in _LOAD_QUALIFIERS)
+    )
 
 
 def _classify(parameter: str, context: str) -> tuple[str, str, str] | None:
@@ -210,6 +267,10 @@ def _classify(parameter: str, context: str) -> tuple[str, str, str] | None:
     if n == "fy" or "yield" in n:
         return "yield_strength", "Yield strength (Fy)", "pile"
 
+    # --- installation torque rating (a manufacturer pile spec) -------------
+    if "torque" in n:
+        return "torque_rating", "Torque rating", "pile"
+
     # --- ratios (checked before bare "moment"/"shear" word matches) --------
     if _is_ratio_parameter(n):
         return "result_ratio", "D/C ratio", "results"
@@ -217,6 +278,10 @@ def _classify(parameter: str, context: str) -> tuple[str, str, str] | None:
     # --- capacities are strength/capacity data, never applied loads --------
     if _is_capacity_parameter(n):
         return None
+
+    # --- deflection / displacement is a serviceability result, not a load --
+    if "deflect" in n or "displacement" in n:
+        return "lateral_deflection", "Lateral deflection", "results"
 
     # --- pile geometry ------------------------------------------------------
     if n in ("dp", "od", "outerdia", "outsidediameter", "diameterod"):
@@ -241,14 +306,24 @@ def _classify(parameter: str, context: str) -> tuple[str, str, str] | None:
         return "pile_length", "Pile length", "pile"
 
     # --- loads --------------------------------------------------------------
-    if "compress" in n or n in ("axial", "axialload", "axialforce"):
-        return "load_compression", "Compression load", "loads"
-    if "tension" in n or "uplift" in n or "pullout" in n:
-        return "load_tension", "Tension load", "loads"
-    if "shear" in n or "lateral" in n:
-        return "load_shear", "Shear load", "loads"
-    if "moment" in n or "bending" in n:
-        return "load_moment", "Moment", "loads"
+    # Only treat as applied load if explicitly labeled as a load/force, and not
+    # a geometric/section quantity such as "Unbraced length for compression
+    # flange".  ``n`` is compacted (no spaces) so word-boundary exclusions must
+    # run against a spaced copy of the original parameter.
+    if _LOAD_KEYWORD_RE.search(n):
+        words = re.sub(r"[^a-z0-9]+", " ", stripped.lower())
+        if _is_interaction_label(stripped):
+            return None
+        if re.search(r"\b(flange|length|brace|unbraced|effective|factor|slenderness|lambda|buckling|inertia)\b", words):
+            pass  # likely not an applied load
+        elif "compress" in n or n in ("axial", "axialload", "axialforce"):
+            return "load_compression", "Compression load", "loads"
+        elif "tension" in n or "uplift" in n or "pullout" in n:
+            return "load_tension", "Tension load", "loads"
+        elif "shear" in n or "lateral" in n:
+            return "load_shear", "Shear load", "loads"
+        elif "moment" in n or "bending" in n:
+            return "load_moment", "Moment", "loads"
 
     return None
 
@@ -544,7 +619,7 @@ _KW_VALUE = re.compile(
     r")\b"
     r"\s*(?:\([^)]*\))?\s*[=:]?\s*"
     r"(?P<num>[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
-    r"\s*(?P<unit>[A-Za-z\u00b5%\u00b0][A-Za-z0-9\u00b5%\u00b0*/\u00b7^]*)?",
+    r"\s*(?P<unit>[A-Za-z\u00b5%\u00b0][A-Za-z0-9\u00b5%\u00b0*/\u00b7^\-]*)?",
     re.I,
 )
 _RATIO_KW = re.compile(
@@ -710,6 +785,15 @@ _REQUIRED = [
 ]
 
 
+def required_key_points() -> list[tuple[str, str]]:
+    """Public view of the required ``(key, label)`` pairs.
+
+    This is the same list ``_missing_keys`` uses, so a caller can never
+    introduce a requirement the deterministic pipeline does not already have.
+    """
+    return list(_REQUIRED)
+
+
 def _missing_keys(kp: KeyPointsResult) -> list[str]:
     present: set[str] = set()
     for section in (kp.project, kp.pile, kp.loads, kp.results):
@@ -731,7 +815,8 @@ def _missing_keys(kp: KeyPointsResult) -> list[str]:
 def _build_evaluation(kp: KeyPointsResult) -> list[str]:
     lines: list[str] = []
 
-    for r in kp.results:
+    ratios = [r for r in kp.results if r.key == "result_ratio"]
+    for r in ratios:
         ctx = f" [{r.context}]" if r.context else ""
         if isinstance(r.value, float):
             if r.value <= 1.0:
@@ -745,16 +830,16 @@ def _build_evaluation(kp: KeyPointsResult) -> list[str]:
                          "(value is not numeric)")
 
     load_ctx = {l_.context for l_ in kp.loads if l_.context}
-    result_ctx = {r.context for r in kp.results if r.context}
+    result_ctx = {r.context for r in ratios if r.context}
     for ctx in sorted(load_ctx - result_ctx):
         lines.append(f"Load case {ctx!r} has applied loads but no D/C ratio "
                      "in the report.")
 
-    if kp.results and all(
-        isinstance(r.value, float) and r.value <= 1.0 for r in kp.results
+    if ratios and all(
+        isinstance(r.value, float) and r.value <= 1.0 for r in ratios
     ):
         lines.append("All reported D/C ratios are within capacity (<= 1.0).")
-    elif not kp.results:
+    elif not ratios:
         lines.append("No D/C ratio found in the report; capacity cannot be evaluated.")
 
     if not kp.references:
@@ -832,7 +917,8 @@ def _collapse_identical(points: list[KeyPoint]) -> list[KeyPoint]:
 
 
 _CANONICAL_PILE_ORDER = ["pile_diameter", "pile_thickness", "yield_strength",
-                         "helix_count", *[f"helix_dia_{i}" for i in range(1, 6)],
+                         "helix_count", "helix_thickness",
+                         *[f"helix_dia_{i}" for i in range(1, 6)],
                          "helix_dia", "pile_length"]
 _CANONICAL_LOAD_ORDER = ["load_compression", "load_tension", "load_shear", "load_moment"]
 
@@ -840,6 +926,365 @@ _CANONICAL_LOAD_ORDER = ["load_compression", "load_tension", "load_shear", "load
 def _ordered(points: list[KeyPoint], order: list[str]) -> list[KeyPoint]:
     rank = {key: i for i, key in enumerate(order)}
     return sorted(points, key=lambda p: (rank.get(p.key, len(order)), p.context, p.label))
+
+
+# --------------------------------------------------------------------------
+# Dedicated HelixPile readers (deterministic; keyed on table structure)
+#
+# The generic classifier reads every table, so it can confuse a capacity column
+# with an applied load or a section heading with a load case.  These helpers
+# read the report's own summary tables directly and are used in preference to
+# the generic path when the table is present.
+# --------------------------------------------------------------------------
+
+
+def _cell(row: list[str], index: int) -> str:
+    return (row[index] or "").strip() if index < len(row) else ""
+
+
+def _find_table(docs: list[ExtractedDocument], required: list[str], page: int | None = None):
+    """First (doc, table) whose header set contains every ``required`` name."""
+    needed = {_compact(h) for h in required}
+    for doc in docs:
+        for table in doc.tables:
+            if page is not None and not table.location.startswith(f"page {page}"):
+                continue
+            if needed <= {_compact(h) for h in table.headers}:
+                return doc, table
+    return None, None
+
+
+def _columns(table) -> dict[str, int]:
+    return {_compact(h): i for i, h in enumerate(table.headers)}
+
+
+def _extract_helx_project(docs: list[ExtractedDocument]) -> KeyPoint | None:
+    """The real project name, from the saved ``*.HELX`` model file path.
+
+    HelixPile's title page prints ``File: ...\\PEMB (Perimeter A).HELX``; the
+    ``Project:`` label is the client/job header, not the model name.
+    """
+    rx = re.compile(r"File:.*[\\/](?P<name>[^\\/]+?)\.helx\b", re.I)
+    for doc in docs:
+        for chunk in doc.text_chunks:
+            match = rx.search(chunk.text)
+            if match:
+                name = match.group("name").strip()
+                if name:
+                    return KeyPoint(
+                        category="project", key="project_name", label="Project name",
+                        value=name, unit=None, context="", source=doc.path.name,
+                        location=chunk.location,
+                        raw=f"File: ...{name}.HELX",
+                    )
+    return None
+
+
+def _section_label(fields, docs: list[ExtractedDocument]):
+    """First printed section label found, as ``(section_dict, source, location, raw)``.
+
+    ``"Helical pile section: 7.63 x 0.375 x 80 ksi (3)24 x 0.5"`` ->
+    ``({od_in: 7.63, wall_in: 0.375, ..., helix_thickness_in: 0.5}, ...)``.
+    """
+    for f in fields:
+        section = parse_section(getattr(f, "raw", "") or "")
+        if section:
+            return section, f.source, f.location, f.raw
+    for doc in docs:
+        for chunk in doc.text_chunks:
+            for line in chunk.text.splitlines():
+                section = parse_section(line)
+                if section:
+                    return section, doc.path.name, chunk.location, line.strip()
+    return None
+
+
+def _extract_section_geometry(
+    docs: list[ExtractedDocument], fields
+) -> list[KeyPoint]:
+    """Wall and helix-plate thickness parsed from the printed section label.
+
+    Kept separate from the rounded table values (e.g. ``tP = 0.38``).
+    """
+    found = _section_label(fields, docs)
+    if not found:
+        return []
+    section, source, location, raw = found
+    out: list[KeyPoint] = []
+    if section.get("wall_in") is not None:
+        out.append(KeyPoint(
+            category="pile", key="pile_wall_thickness",
+            label="Pile wall thickness (section label)",
+            value=section["wall_in"], unit="in", context="",
+            source=source, location=location, raw=raw,
+        ))
+    if section.get("helix_thickness_in") is not None:
+        out.append(KeyPoint(
+            category="pile", key="helix_thickness",
+            label="Helix plate thickness (section label)",
+            value=section["helix_thickness_in"], unit="in", context="",
+            source=source, location=location, raw=raw,
+        ))
+    return out
+
+
+def _find_factored_loads_table(docs: list[ExtractedDocument]):
+    """First (doc, table) reporting factored per-stage compression/tension.
+
+    HelixPile also prints a "Critical Stage" table whose columns are the
+    *factored* design loads ("Factored Compress. load (k)" / "Factored Tension
+    load (k)"), alongside capacity columns.  Prefer the table with the most
+    stages so the per-stage split (compression vs uplift) is preserved.
+    """
+    best_doc = best_table = None
+    best_rows = -1
+    for doc in docs:
+        for table in doc.tables:
+            compact = [_compact(h) for h in table.headers]
+            has_comp = any(h.startswith("factoredcomp") for h in compact)
+            has_ten = any(h.startswith("factoredtension") for h in compact)
+            if has_comp and has_ten and len(table.rows) > best_rows:
+                best_doc, best_table, best_rows = doc, table, len(table.rows)
+    return best_doc, best_table
+
+
+def _extract_applied_loads(docs: list[ExtractedDocument]) -> list[KeyPoint]:
+    """Applied head loads from the report's own factored-load summary tables."""
+    doc, table = _find_table(docs, ["Stage", "Axial load", "F.xx"])
+    if table is None:
+        return _extract_factored_loads(docs)
+    units, data = _split_unit_row(table)
+    cols = _columns(table)
+    i_axial, i_lat, i_mom = cols.get("axialload"), cols.get("fxx"), cols.get("mxx")
+    if i_axial is None:
+        return []
+
+    def colunit(index):
+        return units[index] if units and index is not None and index < len(units) else None
+
+    out: list[KeyPoint] = []
+    for row in data:
+        stage = _cell(row, 0)
+        if _try_number(stage) is None:
+            continue
+        context = f"Stage {int(float(stage))}"
+        for index, key, label, fallback in (
+            (i_axial, None, None, "k"),
+            (i_lat, "load_shear", "Shear load", "k"),
+            (i_mom, "load_moment", "Moment", "k-ft"),
+        ):
+            if index is None or index >= len(row):
+                continue
+            value, unit, raw = split_value_unit(_cell(row, index))
+            if not isinstance(value, float):
+                continue
+            unit = unit or colunit(index) or fallback
+            if key is None:
+                if value < 0:
+                    key, label = "load_tension", "Tension load"
+                else:
+                    key, label = "load_compression", "Compression load"
+            out.append(KeyPoint(
+                category="loads", key=key, label=label, value=value, unit=unit,
+                context=context, source=doc.path.name, location=table.location, raw=raw,
+            ))
+    return out
+
+
+def _extract_factored_loads(docs: list[ExtractedDocument]) -> list[KeyPoint]:
+    """Per-stage factored compression/tension loads from the Critical Stage table."""
+    doc, table = _find_factored_loads_table(docs)
+    if table is None:
+        return []
+    cols = _columns(table)
+    i_comp = next((i for h, i in cols.items() if h.startswith("factoredcomp")), None)
+    i_ten = next((i for h, i in cols.items() if h.startswith("factoredtension")), None)
+    units, data = _split_unit_row(table)
+    out: list[KeyPoint] = []
+    for row in data:
+        match = re.search(r"(\d+)", _cell(row, 0))
+        if not match:
+            continue
+        context = f"Stage {match.group(1)}"
+        for index, key, label in (
+            (i_comp, "load_compression", "Compression load"),
+            (i_ten, "load_tension", "Tension load"),
+        ):
+            if index is None or index >= len(row):
+                continue
+            value, unit, raw = split_value_unit(_cell(row, index))
+            if not isinstance(value, float) or value == 0.0:
+                continue
+            unit = unit or (units[index] if units and index < len(units) else None) or "k"
+            out.append(KeyPoint(
+                category="loads", key=key, label=label, value=value, unit=unit,
+                context=context, source=doc.path.name, location=table.location, raw=raw,
+            ))
+    return out
+
+
+def _extract_stage_ratios(docs: list[ExtractedDocument]) -> list[KeyPoint]:
+    """Per-stage R/CAP, R/STR, R/GEO utilisation ratios (p.12)."""
+    doc, table = _find_table(docs, ["Stage No", "R/CAP", "R/STR", "R/GEO"])
+    if table is None:
+        return []
+    cols = _columns(table)
+    out: list[KeyPoint] = []
+    _, data = _split_unit_row(table)
+    for row in data:
+        stage = _cell(row, 0)
+        if _try_number(stage) is None:
+            continue
+        context = f"Stage {int(float(stage))}"
+        for name, label in (("rcap", "R/CAP"), ("rstr", "R/STR"), ("rgeo", "R/GEO")):
+            index = cols.get(name)
+            if index is None or index >= len(row):
+                continue
+            value, unit, raw = split_value_unit(_cell(row, index))
+            if isinstance(value, float):
+                out.append(KeyPoint(
+                    category="results", key="result_ratio", label=label, value=value,
+                    unit=unit, context=context, source=doc.path.name,
+                    location=table.location, raw=raw,
+                ))
+    return out
+
+
+def _extract_corrosion(docs: list[ExtractedDocument]) -> list[KeyPoint]:
+    """Design life and corrosion loss from the corrosion table (p.9)."""
+    doc, table = _find_table(docs, ["Thickness loss", "Steel loss"])
+    if table is None:
+        doc, table = _find_table(docs, ["thicknesslosssteelin"])
+    if table is None:
+        return []
+    headers = list(table.headers)
+    sub = list(table.rows[0]) if table.rows else []
+    data = list(table.rows[1:]) if table.rows else []
+    out: list[KeyPoint] = []
+    for row in data:
+        if not _cell(row, 0).lower().startswith("stage"):
+            continue
+        for index in range(len(headers)):
+            combined = f"{headers[index]} {_cell(sub, index)}".lower()
+            value, unit, raw = split_value_unit(_cell(row, index))
+            if not isinstance(value, float):
+                continue
+            if "life" in combined and "year" in combined:
+                out.append(KeyPoint(
+                    category="results", key="design_life", label="Design life",
+                    value=value, unit="years", context="", source=doc.path.name,
+                    location=table.location, raw=raw,
+                ))
+            elif "thickness loss" in combined and "steel" in combined:
+                if unit is None and "in" in combined:
+                    unit = "in"
+                out.append(KeyPoint(
+                    category="results", key="corrosion_thickness_loss",
+                    label="Corrosion thickness loss", value=value, unit=unit or "in",
+                    context="", source=doc.path.name, location=table.location, raw=raw,
+                ))
+            elif "steel loss" in combined:
+                out.append(KeyPoint(
+                    category="results", key="corrosion_steel_loss",
+                    label="Corrosion steel loss", value=value, unit="%",
+                    context="", source=doc.path.name, location=table.location, raw=raw,
+                ))
+        break  # Stage 0 row carries the design values
+    return out
+
+
+def _extract_settlement(docs: list[ExtractedDocument]) -> list[KeyPoint]:
+    """Settlement (design + ultimate) and their capacities (p.7)."""
+    doc, table = _find_table(docs, ["Ult. capacity", "Design capacity"])
+    if table is None:
+        return []
+    cols = _columns(table)
+    index_of = {
+        "settlement_ultimate_capacity": cols.get("ultcapacity"),
+        "settlement_ultimate": next(
+            (i for k, i in cols.items() if k.startswith("settlementult")), None),
+        "settlement_design_capacity": cols.get("designcapacity"),
+        "settlement_design": next(
+            (i for k, i in cols.items() if k.startswith("settlementd")), None),
+    }
+    labels = {
+        "settlement_ultimate_capacity": ("Settlement ultimate capacity", "k"),
+        "settlement_ultimate": ("Settlement at ultimate capacity", "in"),
+        "settlement_design_capacity": ("Settlement design capacity", "k"),
+        "settlement_design": ("Settlement at design load", "in"),
+    }
+    units, data = _split_unit_row(table)
+    for row in data:
+        if not _cell(row, 0).lower().startswith("stage"):
+            continue
+        out: list[KeyPoint] = []
+        for key, (label, fallback) in labels.items():
+            index = index_of[key]
+            if index is None or index >= len(row):
+                continue
+            value, unit, raw = split_value_unit(_cell(row, index))
+            if not isinstance(value, float):
+                continue
+            unit = unit or (units[index] if units and index < len(units) else None) or fallback
+            out.append(KeyPoint(
+                category="results", key=key, label=label, value=value, unit=unit,
+                context="Stage 0", source=doc.path.name, location=table.location, raw=raw,
+            ))
+        if out:
+            return out
+    return []
+
+
+def _extract_lateral(docs: list[ExtractedDocument]) -> list[KeyPoint]:
+    """Lateral deflection δ.x and max moment Mx.max per stage (p.9)."""
+    doc, table = _find_table(docs, ["δ.x", "Mx.max"])
+    if table is None:
+        return []
+    cols = _columns(table)
+    i_dx, i_mx = cols.get("δx"), cols.get("mxmax")
+    units, data = _split_unit_row(table)
+    out: list[KeyPoint] = []
+    for row in data:
+        stage = _cell(row, 0)
+        if not stage.lower().startswith("stage"):
+            continue
+        context = f"Stage {stage.split()[-1]}" if stage.split() else ""
+        for index, key, label, fallback in (
+            (i_dx, "lateral_deflection", "Max lateral deflection", "in"),
+            (i_mx, "max_moment", "Max internal moment", "k-ft"),
+        ):
+            if index is None or index >= len(row):
+                continue
+            value, unit, raw = split_value_unit(_cell(row, index))
+            if not isinstance(value, float):
+                continue
+            unit = unit or (units[index] if units and index < len(units) else None) or fallback
+            out.append(KeyPoint(
+                category="results", key=key, label=label, value=value, unit=unit,
+                context=context, source=doc.path.name, location=table.location, raw=raw,
+            ))
+    return out
+
+
+def _extract_soil_models(docs: list[ExtractedDocument]) -> list[KeyPoint]:
+    """The lateral soil models per layer (e.g. Sand Reese / Sand API) (p.83)."""
+    doc, table = _find_table(docs, ["Model", "Ksub"])
+    if table is None:
+        return []
+    out: list[KeyPoint] = []
+    for row in table.rows:
+        if len(row) < 2 or not _cell(row, 0) or _try_number(_cell(row, 0)) is not None:
+            continue
+        layer, model = _cell(row, 0), _cell(row, 1)
+        if not model or _compact(model) == "model":
+            continue
+        out.append(KeyPoint(
+            category="results", key="soil_model", label="Lateral soil model",
+            value=model, unit=None, context=layer, source=doc.path.name,
+            location=table.location, raw=f"{layer}: {model}",
+        ))
+    return out
+
 
 
 # --------------------------------------------------------------------------
@@ -900,6 +1345,12 @@ def extract_key_points(result: ExtractionResult,
     kp = KeyPointsResult()
 
     kp.project = _extract_project_info(docs)
+    helx = _extract_helx_project(docs)
+    if helx is not None:
+        for p in kp.project:
+            if p.key == "project_name":
+                p.key, p.label = "client_project", "Client project (title page)"
+        kp.project.insert(0, helx)
     if not any(p.key == "software" for p in kp.project):
         kp.project.extend(_extract_software(docs))
 
@@ -910,9 +1361,24 @@ def extract_key_points(result: ExtractionResult,
     results = _merge(results, [p for p in prose if p.category == "results"])
     pile = _merge(pile, [p for p in prose if p.category == "pile"])
 
+    wall = _extract_section_geometry(docs, result.fields)
+    pile = pile + wall
     kp.pile = _ordered(_collapse_identical(pile), _CANONICAL_PILE_ORDER)
-    kp.loads = _ordered(loads, _CANONICAL_LOAD_ORDER)
-    kp.results = _ordered(_merge(results, _prose_ratios(docs)), [])
+
+    applied = _extract_applied_loads(docs)
+    kp.loads = (
+        _ordered(applied, _CANONICAL_LOAD_ORDER) if applied
+        else _ordered(loads, _CANONICAL_LOAD_ORDER)
+    )
+
+    stage_ratios = _extract_stage_ratios(docs)
+    if stage_ratios:
+        results = stage_ratios
+    else:
+        results = _merge(results, _prose_ratios(docs))
+    extra = (_extract_corrosion(docs) + _extract_settlement(docs)
+             + _extract_lateral(docs) + _extract_soil_models(docs))
+    kp.results = _ordered(results + extra, [])
 
     kp.references = _extract_references(docs)
     kp.missing = _missing_keys(kp)

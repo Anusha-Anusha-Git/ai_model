@@ -12,7 +12,9 @@ Then open http://localhost:8000
 
 from __future__ import annotations
 
+import errno
 import json
+import sys
 import tempfile
 from argparse import ArgumentParser
 from email.parser import BytesParser
@@ -20,13 +22,16 @@ from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from app.config import load_project_inputs, project_inputs_provenance
 from app.extraction.document_loader import ExtractedDocument, TextChunk, load_document
 from app.extraction.field_extractor import extract_fields
-from app.pdf_builder import executive_summary_filename
+from app.pdf_builder import CHART_CONFLICT_MIN_SIDES, executive_summary_filename
 from app.report.executive_summary import build_executive_summary_narrative_pdf
-from app.report.key_points import extract_key_points
+from app.report.key_points import extract_key_points, is_key_point_parameter
+from app.report.verification_table import append_verification_table_pdf
 from app.report.pdf_report import ExtractionPayload, generate_pdf
-from app.report.summary import generate_clean_summary
+from app.report.summary import describe_field_coverage, generate_clean_summary
+from app.ai.fallback import maybe_build_ai_suggestions
 
 WEB_DIR = Path(__file__).resolve().parent
 INDEX_HTML = WEB_DIR / "index.html"
@@ -78,17 +83,25 @@ def _read_body(handler: BaseHTTPRequestHandler) -> bytes:
     return handler.rfile.read(length)
 
 
-def _parse_multipart(content_type: str, body: bytes) -> list[tuple[str, bytes]]:
-    """Return (filename, data) pairs from a multipart/form-data body."""
+def _parse_multipart(
+    content_type: str, body: bytes
+) -> tuple[list[tuple[str, bytes]], dict[str, str]]:
+    """Return (files, fields) pairs from a multipart/form-data body."""
     msg = BytesParser(policy=email_policy).parsebytes(
         b"Content-Type: " + content_type.encode("utf-8") + b"\r\n\r\n" + body
     )
     files: list[tuple[str, bytes]] = []
+    fields: dict[str, str] = {}
     for part in msg.iter_parts():
         name = part.get_filename()
         if name:
             files.append((name, part.get_payload(decode=True) or b""))
-    return files
+            continue
+        field_name = part.get_param("name", header="content-disposition")
+        if field_name:
+            payload = part.get_payload(decode=True) or b""
+            fields[field_name] = payload.decode("utf-8", "replace")
+    return files, fields
 
 
 def get_val(fields, param_name, context_contains=None):
@@ -115,16 +128,72 @@ def build_clean_summary(fields, project=None):
     return generate_clean_summary(fields, project=project)
 
 
-def _run_extraction(documents: list[ExtractedDocument]) -> dict:
+def _inputs_from_form(fields: dict[str, str]) -> object:
+    """Read the optional ``project_inputs`` JSON form field from the upload."""
+    raw = fields.get("project_inputs")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _run_extraction(
+    documents: list[ExtractedDocument], project_inputs: object = None
+) -> dict:
     result = extract_fields(documents)
     payload = result.to_dict()
     key_points = extract_key_points(result, documents).to_dict()
     payload["key_points"] = key_points
-    payload["clean_engineering_summary"] = build_clean_summary(
-        payload.get("fields", []), key_points.get("project", [])
-    )
+    payload["clean_engineering_summary"] = build_clean_summary(key_points)
+    payload["field_coverage"] = describe_field_coverage(payload)
     payload["document_text"] = "\n\n".join(doc.full_text() for doc in documents)[:60_000]
+    payload["project_inputs"] = load_project_inputs(overrides=project_inputs)
+    payload["provenance"] = {"project_inputs": project_inputs_provenance()}
+    payload["warnings"] = _conflict_warnings(payload) + list(
+        payload.get("warnings") or []
+    )
+    # Optional, flag-gated, and never merged into `fields`: suggestions are
+    # separate AI-generated entries for missing required key points. When the
+    # flag is off this returns None and the payload is byte-for-byte unchanged.
+    ai_suggestions = maybe_build_ai_suggestions(
+        documents, result, payload["key_points"]
+    )
+    if ai_suggestions is not None:
+        payload["ai_suggestions"] = ai_suggestions
     return payload
+
+
+def _conflict_warnings(payload: dict) -> list[str]:
+    """Restate each *meaningful* unresolved conflict as a warning.
+
+    Conflicts are still reported separately (and never resolved); this makes the
+    ones a summary would actually surface visible in the warning list. The field
+    extractor also flags every chart/coordinate column and long plotted data
+    series (see ``is_key_point_parameter``); those are drawing data, not
+    specification disagreements, so they are omitted here -- exactly as the
+    Executive Summary omits them.
+    """
+    warnings: list[str] = []
+    for conflict in payload.get("conflicts") or []:
+        if not isinstance(conflict, dict):
+            continue
+        parameter = conflict.get("parameter") or "value"
+        if not is_key_point_parameter(parameter):
+            continue
+        sides = sorted(
+            {
+                f"{field.get('value')} {field.get('unit') or ''}".strip()
+                for field in conflict.get("fields") or []
+                if isinstance(field, dict)
+            }
+        )
+        if len(sides) >= CHART_CONFLICT_MIN_SIDES:
+            continue  # chart/analysis data series, not a conflict
+        warnings.append(f"Unresolved conflict — {parameter}: {'; '.join(sides)}")
+    return warnings
 
 
 def _pasted_document(text: str) -> ExtractedDocument:
@@ -152,6 +221,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        # Always serve the current UI: a stale cached page hides newly added
+        # form fields until the user does a hard refresh.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
@@ -187,7 +260,47 @@ class _Handler(BaseHTTPRequestHandler):
         data = json.loads(_read_body(self).decode("utf-8") or "{}")
         if not isinstance(data, dict):
             raise ValueError("expected a JSON object")
-        body = build_executive_summary_narrative_pdf(data)
+        try:
+            body = build_executive_summary_narrative_pdf(data)
+        except Exception as exc:
+            print(f"[PDF] ERROR building Executive Summary: {exc}")
+            import traceback
+            traceback.print_exc()
+            # Try to produce something minimal
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas as pdfcanvas
+            import io
+            buf = io.BytesIO()
+            c = pdfcanvas.Canvas(buf, pagesize=A4)
+            c.drawString(72, 750, "Executive Summary")
+            c.showPage()
+            c.save()
+            body = buf.getvalue()
+        try:
+            body = append_verification_table_pdf(body, data)
+        except Exception as exc:
+            print(f"[PDF] ERROR appending verification table: {exc}")
+            import traceback
+            traceback.print_exc()
+        # Try to add cover page if available
+        try:
+            from app.report.cover_page_v2 import build_cover_page_pdf
+            import pymupdf
+            cover_fields = data.get("cover_page") or {}
+            # merge in some fields if passed differently, but don't auto-extract from report
+            cover_pdf = build_cover_page_pdf(cover_fields)
+            # prepend
+            base = pymupdf.open(stream=cover_pdf, filetype="pdf")
+            rest = pymupdf.open(stream=body, filetype="pdf")
+            base.insert_pdf(rest)
+            body = base.tobytes(garbage=4, deflate=True)
+            base.close()
+            rest.close()
+        except Exception as exc:
+            print(f"[PDF] ERROR adding cover page: {exc}", flush=True)
+            import traceback
+            traceback.print_exc()
+            # Still generate rest of PDF even if cover fails
         return body, executive_summary_filename(data)
 
     def _api_pdf(self) -> tuple[bytes, str]:
@@ -196,7 +309,36 @@ class _Handler(BaseHTTPRequestHandler):
         fields = [item for item in data.get("fields") or [] if isinstance(item, dict)]
         conflicts = [item for item in data.get("conflicts") or [] if isinstance(item, dict)]
         warnings = [str(item) for item in data.get("warnings") or []]
-        body = _render_pdf(fields, conflicts, warnings)
+        try:
+            body = _render_pdf(fields, conflicts, warnings)
+        except Exception as exc:
+            print(f"[PDF] ERROR rendering PDF: {exc}")
+            import traceback
+            traceback.print_exc()
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas as pdfcanvas
+            import io
+            buf = io.BytesIO()
+            c = pdfcanvas.Canvas(buf, pagesize=A4)
+            c.drawString(72, 750, "Helical Pile Review Report")
+            c.showPage()
+            c.save()
+            body = buf.getvalue()
+        try:
+            from app.report.cover_page_v2 import build_cover_page_pdf
+            import pymupdf
+            cover_fields = data.get("cover_page") or {}
+            cover_pdf = build_cover_page_pdf(cover_fields)
+            base = pymupdf.open(stream=cover_pdf, filetype="pdf")
+            rest = pymupdf.open(stream=body, filetype="pdf")
+            base.insert_pdf(rest)
+            body = base.tobytes(garbage=4, deflate=True)
+            base.close()
+            rest.close()
+        except Exception as exc:
+            print(f"[PDF] ERROR adding cover page: {exc}", flush=True)
+            import traceback
+            traceback.print_exc()
         return body, "helical_pile_review_report.pdf"
 
     def _api_extract(self) -> dict:
@@ -205,22 +347,23 @@ class _Handler(BaseHTTPRequestHandler):
         documents: list[ExtractedDocument] = []
 
         if "multipart/form-data" in content_type:
-            files = _parse_multipart(content_type, body)
+            files, fields = _parse_multipart(content_type, body)
             if not files:
                 raise ValueError("no files received")
+            inputs = _inputs_from_form(fields)
             with tempfile.TemporaryDirectory(prefix="engai-upload-") as tmp:
                 for name, data in files:
                     path = Path(tmp) / (Path(name).name or "upload")
                     path.write_bytes(data)
                     documents.append(load_document(path))
-                return _run_extraction(documents)
+                return _run_extraction(documents, inputs)
 
         if "application/json" in content_type:
             data = json.loads(body.decode("utf-8") or "{}")
             text = (data.get("text") or "").strip()
             if not text:
                 raise ValueError("no text received")
-            return _run_extraction([_pasted_document(text)])
+            return _run_extraction([_pasted_document(text)], data.get("project_inputs"))
 
         raise ValueError("unsupported content type; send multipart/form-data or JSON")
 
@@ -231,7 +374,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
 
-    server = ThreadingHTTPServer((args.host, args.port), _Handler)
+    server = None
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), _Handler)
+    except OSError as exc:
+        if getattr(exc, "errno", None) == errno.EADDRINUSE:
+            print(
+                f"Port {args.port} is already in use (another server is running).",
+                file=sys.stderr,
+            )
+            print(
+                "Stop that server, or start this one on a different port:",
+                file=sys.stderr,
+            )
+            print(
+                f"    python -m app.web.server --port {args.port + 1}",
+                file=sys.stderr,
+            )
+            return 1
+        raise
+
     print(f"Serving on http://{args.host}:{args.port}  (Ctrl+C to stop)")
     try:
         server.serve_forever()
@@ -244,3 +406,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

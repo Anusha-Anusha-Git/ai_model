@@ -320,3 +320,79 @@ def test_traceable_never_bare():
         for p in section:
             assert p.source and p.location
             assert p.raw
+
+
+# --------------------------------------------------------------------------
+# HelixPile factored loads + capacity/section exclusions (regression)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "parameter",
+    [
+        "Plate T\nension\n(k)",
+        "Cylinde\nr\nTension\n(k)",
+        "GEO. CAP.\ntension (k)",
+        "GEO.\nTension\nCapacit\ny (k)",
+        "Unbraced length for compression flange L b",
+        "Unbraced length for strong axis L xx",
+        "Strong axis moment of inertia I xx",
+        "Torsional moment of inertia J",
+        # Interaction-diagram abbreviations are plotted curves, not loads.
+        "D.Tension",
+        "M D.Comp",
+        "Q PL.1ULT.Tension",
+        "Q PL.3.ULT.Comp",
+        "ULT.TENSION",
+        "DES.TENSION",
+        "F tension",
+    ],
+)
+def test_capacity_and_section_terms_are_not_applied_loads(parameter):
+    """Capacities, section properties and chart labels are not applied loads."""
+    assert _classify(parameter, "Stage 0") is None
+
+
+@pytest.mark.parametrize(
+    "parameter",
+    ["Max compression load", "Net uplift", "Design shear", "Service uplift"],
+)
+def test_qualified_load_labels_still_classify(parameter):
+    assert _classify(parameter, "Stage 0") is not None
+
+
+@pytest.mark.parametrize(
+    "parameter, expected",
+    [
+        ("Factored\nCompress.\nload (k)", "load_compression"),
+        ("Factored\nTension load\n(k)", "load_tension"),
+        ("Compression load", "load_compression"),
+        ("Uplift load", "load_tension"),
+    ],
+)
+def test_real_load_labels_still_classify(parameter, expected):
+    classified = _classify(parameter, "Stage 0")
+    assert classified is not None
+    assert classified[0] == expected
+    assert classified[2] == "loads"
+
+
+def test_factored_loads_table_used_instead_of_capacity_noise():
+    table = Table(
+        location="page 6, table 2",
+        headers=[
+            "Critical\nStage", "Factored\nCompress.\nload (k)",
+            "Factored\nTension load\n(k)", "GEO. CAP.\ntension (k)",
+            "Plate T\nension\n(k)",
+        ],
+        rows=[["Stage 0", "120", "16.00", "125.79", "128.52"]],
+    )
+    doc = ExtractedDocument(path=Path("helix.pdf"), file_type="pdf", tables=[table])
+    kp = extract_key_points(extract_fields(doc), doc)
+
+    comp = [l for l in kp.loads if l.key == "load_compression"]
+    ten = [l for l in kp.loads if l.key == "load_tension"]
+    assert [(l.value, l.unit) for l in comp] == [(120.0, "k")]
+    assert [(l.value, l.unit) for l in ten] == [(16.0, "k")]
+    # 125.79 / 128.52 are capacities and must never surface as applied loads
+    assert all(l.value not in (125.79, 128.52) for l in kp.loads)

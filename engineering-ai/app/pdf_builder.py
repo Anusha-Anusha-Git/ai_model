@@ -666,7 +666,7 @@ def _result_rows_from_keypoints(
 
     contexts: list[str] = []
     for record in records:
-        context = _clean(record.get("context")) or "Load case not stated"
+        context = _clean(record.get("context")) or "Load case not specified"
         if context not in contexts:
             contexts.append(context)
 

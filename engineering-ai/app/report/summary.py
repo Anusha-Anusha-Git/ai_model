@@ -18,7 +18,12 @@ import sys
 from pathlib import Path
 
 from app.extraction.document_loader import ExtractedDocument, load_many
-from app.extraction.field_extractor import ExtractedField, Table, extract_fields
+from app.extraction.field_extractor import (
+    ExtractedField,
+    Table,
+    extract_fields,
+    is_valid_summary_unit,
+)
 from app.report.key_points import extract_key_points
 
 # --------------------------------------------------------------------------
@@ -117,15 +122,15 @@ PROCESSING RULES:
 4. Use only DESIGN capacities in the requested capacity fields. Never substitute an ULTIMATE capacity. If design capacity is absent, write "{MISSING_VALUE}".
 5. Governing stage: use an explicitly printed governing stage; otherwise select the stage with the largest explicitly reported R/CAP in the final analysis-summary rows. If no valid comparison exists, write "{MISSING_VALUE}".
 6. Overall adequacy is PASS only when the governing R/CAP is explicitly reported and less than 1.0. A ratio greater than or equal to 1.0 is FAIL. If no governing ratio is available, state FAIL — adequacy cannot be demonstrated from the reported ratios.
-7. Preserve source units exactly as printed. If a printed number has no unit, write the bare number with no unit suffix and no unit note. Ratios are dimensionless and may be written with "(dimensionless)".
+7. Preserve source units exactly as printed, attached to the value and to the parameter they belong to (e.g. "Fy: 70 ksi", "O.D.: 18 in", "Axial: 126 k", "Uplift: 141.6 k"). Every physical quantity must carry the unit the source printed for it. Only write a bare number when the source itself prints no unit for that value, and never move a unit from one parameter onto another. Ratios, counts, and utilization values are dimensionless: write them with no unit (a utilization ratio may be labelled "(dimensionless)") and never attach a length, force, or stress unit to them.
 8. If a required value is absent, write exactly "{MISSING_VALUE}". If final values conflict and the governing value cannot be identified, write "{MISSING_VALUE}" and identify the conflict under Red Flags to Verify.
 9. Infer Location only when the supplied source path contains an explicit place name. Do not treat generic folder names, usernames, or filenames as a project location.
 10. References must cite the exact supplied source filename and page, sheet, table, or line location. Cite exact table column headers when no printed table title exists. Never invent a table name or page. If no source location is available, write "{MISSING_VALUE}".
 11. Do not add a title, introduction, conclusion, disclaimer, Markdown heading, code fence, or extra section.
 12. Never name a code, standard, or assumed soil parameter that is not printed in the source data. Do not write a specific friction angle, cohesion, unit weight, corrosion allowance, or design life unless that number appears in the source; otherwise write "{MISSING_VALUE}". "Verify against the geotechnical report" is acceptable only as generic advice and must not assert a value.
 13. Section 1 project lines come from "project_title_block" first, then the field data. That block holds the printed title-page lines verbatim; a project name, structure, location, client, prepared-by, or date printed there is a source value, not an inference. If the block has no such line and the field data has none either, write "{MISSING_VALUE}" -- do not reconstruct a project name from a file path or a pile schedule.
-14. "document_text" is the report itself, in reading order. Read it before answering. A title page, a heading, a note, or a value the field extractor did not turn into a structured field is still there and may be copied from it. Prefer a value you can see in "document_text" over a field you cannot place.
-15. "fields" is a filtered subset, not the whole report. A value absent from "fields" is not evidence that the report omits it -- check "document_text" before writing "{MISSING_VALUE}", and cite the document_text location you used.
+14. "fields" holds the extracted key points -- the complete set of values you may use. Write prose only from them. Do not introduce any number, unit, or named standard that is not present in "fields".
+15. If a value is not present in "fields", write "{MISSING_VALUE}" -- never recreate it from prose, a file path, or another parameter.
 
 OUTPUT RULES:
 - Output exactly sections 1 through 9 in the order shown below.
@@ -481,22 +486,19 @@ def generate_markdown_summary(
 
     result = extract_fields(docs)
     raw_fields = list(result.fields)
-    clean_fields = filter_noise_for_llm(raw_fields, tables)
-    # A title block holds no number, so Stage 2b never emits it as a field.
-    # Stage 2c reads it from the document text; hand it to the model explicitly.
-    project = [p.to_dict() for p in extract_key_points(result, docs).project]
-    # Read the document as a person would: the model gets the report text, not
-    # only the extracted numbers, so title pages, notes, and labels it was never
-    # turned into fields for are still visible to it.
-    document_text = "\n\n".join(doc.full_text() for doc in docs)
-    relevant_fields = _summarizer_relevant_fields(clean_fields)
+    # The model receives ONLY the key points: values already extracted, already
+    # carrying their source units. No raw document text is sent, so a number can
+    # only appear in the output if it is a printed key-point value.
+    key_points_obj = extract_key_points(result, docs)
+    key_points = key_points_obj.to_dict()
+    project = key_points.get("project", [])
+    relevant_fields = _key_points_as_fields(key_points)
     payload = build_prompt_payload(
         relevant_fields,
         len(raw_fields),
         source_paths=source_paths,
         table_references=table_references,
         project=project,
-        document_text=document_text,
     )
     prompt = build_summary_prompt(
         relevant_fields,
@@ -504,7 +506,6 @@ def generate_markdown_summary(
         source_paths=source_paths,
         table_references=table_references,
         project=project,
-        document_text=document_text,
     )
 
     from app.models.llm import generate_response, load_model
@@ -530,19 +531,23 @@ def generate_markdown_summary(
         if not validation_errors:
             break
 
-    if validation_errors:
-        detail = "; ".join(dict.fromkeys(validation_errors))
-        raise ValueError(f"LLM summary failed output validation: {detail}")
-
     stats = {
         "raw_fields": len(raw_fields),
-        "fields_after_noise_filter": len(clean_fields),
+        "fields_after_noise_filter": len(relevant_fields),
         "fields_sent_to_model": len(relevant_fields),
-        "document_text_chars": len(document_text),
-        "dropped_as_graph_or_noise": len(raw_fields) - len(clean_fields),
+        "document_text_chars": 0,
+        "dropped_as_graph_or_noise": len(raw_fields) - len(relevant_fields),
         "conflicts": len(result.conflicts),
         "format_attempts": attempts,
     }
+
+    if validation_errors:
+        # Never fail the pipeline on a bad model answer: fall back to the
+        # deterministic key-point summary (the same values, no LLM wording).
+        stats["fallback"] = True
+        stats["validation_errors"] = list(dict.fromkeys(validation_errors))
+        return _clean_summary_from_key_points(key_points), stats
+
     return markdown, stats
 
 
@@ -613,6 +618,15 @@ def _smart_contains(value, keyword) -> bool:
             rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", text
         ) is not None
     return needle in text
+
+
+def smart_contains(value, keyword) -> bool:
+    """Public form of the deterministic keyword matcher.
+
+    Used by the targeted AI fallback to locate the same printed labels the
+    deterministic summary already recognizes (abbreviations included).
+    """
+    return _smart_contains(value, keyword)
 
 
 def _smart_field(fields, param_keyword, context_keyword=None):
@@ -757,9 +771,12 @@ _SUMMARY_SEARCHES: dict[str, tuple[tuple[str, str | None], ...]] = {
     "helix_diameter": (("dhel", None), ("helix dia", None), ("plate dia", None)),
     "helix_spacing": (("helix spacing", None), ("spacing", None)),
     "compression": (("factored load", "stage 0"), ("axial force", "stage 0"),
-                    ("compression", "stage 0"), ("axial load", "stage 0")),
+                    ("compression", "stage 0"), ("axial load", "stage 0"),
+                    ("applied axial compression", None), ("applied compression", None)),
     "tension": (("factored load", "stage 1"), ("axial force", "stage 1"),
-                ("tension", "stage 1"), ("axial load", "stage 1")),
+                ("tension", "stage 1"), ("axial load", "stage 1"),
+                ("applied axial tension", None), ("applied tension", None),
+                ("applied uplift", None)),
     "shear": (("shear force", None), ("lateral load", None), ("lat force", None),
               ("shear", None)),
     "moment": (("moment force", None), ("moment", "stage"), ("moment", None)),
@@ -789,6 +806,16 @@ _RATIO_KEYWORDS: dict[str, tuple[str, ...]] = {
     "R/STR": ("r/str", "load/cap struct", "structural ratio"),
     "R/CAP": ("r/cap", "load/cap"),
 }
+
+
+def summary_search_terms(key: str) -> tuple[tuple[str, str | None], ...]:
+    """Public view of the deterministic search terms for one summary line."""
+    return tuple(_SUMMARY_SEARCHES.get(key, ()))
+
+
+def ratio_search_terms(key: str) -> tuple[str, ...]:
+    """Public view of the printed ratio-column keywords."""
+    return tuple(_RATIO_KEYWORDS.get(key, ()))
 
 # Lines that must resolve to a number. A non-numeric match here is a header
 # label or a bare unit fragment the extractor kept ("Helix", "(k-ft)",
@@ -972,6 +999,248 @@ def resolve_summary_field(fields, key):
     return field, context
 
 
+def describe_field_coverage(data) -> list[dict]:
+    """Per-summary-line coverage: which values resolved and which did not.
+
+    A diagnostic aid for "Not specified" placeholders in the clean summary and
+    the Executive Summary PDF. For every line the resolver knows, report the
+    printed text and the source location it came from, or ``MISSING_VALUE``
+    when the source prints no such value. It never computes or invents a value.
+
+    ``data`` may be the full extraction payload (a mapping with a ``"fields"``
+    list) or a bare field list.
+    """
+    if isinstance(data, dict):
+        fields = [f for f in data.get("fields") or [] if isinstance(f, dict)]
+    else:
+        fields = [f for f in data or [] if isinstance(f, dict)]
+    coverage = []
+    for key in list(_SUMMARY_SEARCHES) + list(_RATIO_KEYWORDS):
+        field, context = resolve_summary_field(fields, key)
+        coverage.append(
+            {
+                "key": key,
+                "value": _field_text(field) if field is not None else MISSING_VALUE,
+                "context": context,
+                "location": _clean(field.get("Location", field.get("location")))
+                if field is not None
+                else "",
+                "resolved": field is not None,
+            }
+        )
+    return coverage
+
+
+def _kp_find(points, key, context=None, label=None):
+    for p in points:
+        if p.get("key") != key:
+            continue
+        if context is not None and (p.get("context") or "") != context:
+            continue
+        if label is not None and (p.get("label") or "") != label:
+            continue
+        return p
+    return None
+
+
+def _kp_fmt(point):
+    """Format one key point as 'value unit', or None when it must be skipped.
+
+    A unit outside the strict summary whitelist is dropped (the line is
+    omitted): the summary never repeats a unit it is not allowed to print.
+    """
+    if not isinstance(point, dict):
+        return None
+    value = point.get("value")
+    unit = point.get("unit")
+    if value is None or value == "":
+        return None
+    number = f"{value:g}" if isinstance(value, float) else str(value)
+    if unit:
+        if not is_valid_summary_unit(unit):
+            return None
+        return f"{number} {unit}"
+    return number
+
+
+def _kp_bullet(title, point):
+    text = _kp_fmt(point)
+    if text is None:
+        return None
+    return f"- **{title}:** {text}"
+
+
+def _clean_summary_from_key_points(kp: dict) -> str:
+    """Deterministic nine-section summary source ONLY from key points.
+
+    - Every value comes from a key point (already extracted, never re-derived).
+    - A missing value is omitted (no placeholder).
+    - Units must be on the strict summary whitelist or the line is dropped.
+    - Adequacy is PASS only when every reported ratio is < 1.0 AND a design
+      settlement is reported; otherwise settlement is flagged for engineer
+      review. The wording is never "excellent"/"fully adequate".
+    """
+    project = kp.get("project", []) or []
+    pile = kp.get("pile", []) or []
+    loads = kp.get("loads", []) or []
+    results = kp.get("results", []) or []
+
+    def pvalue(key, context=None, label=None):
+        return _kp_find(project, key, context, label)
+
+    lines: list[str] = []
+
+    def add(bullet):
+        if bullet:
+            lines.append(bullet)
+
+    # 1. PROJECT ------------------------------------------------------------
+    lines.append("### 1. PROJECT INFORMATION")
+    for title, point in (
+        ("Project Name", pvalue("project_name")),
+        ("Client project", pvalue("client_project")),
+        ("Structure", pvalue("structure")),
+        ("Location", pvalue("location")),
+        ("Client", pvalue("client")),
+        ("Prepared By", pvalue("prepared_by")),
+        ("Date", pvalue("date")),
+        ("Software", pvalue("software")),
+    ):
+        add(_kp_bullet(title, point))
+
+    # 2. PILE ---------------------------------------------------------------
+    lines.append("")
+    lines.append("### 2. PILE SPECIFICATIONS")
+    for title, point in (
+        ("Pile Diameter (O.D.)", _kp_find(pile, "pile_diameter")),
+        ("Pile Wall Thickness", _kp_find(pile, "pile_wall_thickness")
+         or _kp_find(pile, "pile_thickness")),
+        ("Yield Strength (Fy)", _kp_find(pile, "yield_strength")),
+        ("# of Helices", _kp_find(pile, "helix_count")),
+        ("Helix Diameter", _kp_find(pile, "helix_dia")),
+    ):
+        add(_kp_bullet(title, point))
+
+    # 3. APPLIED LOADS ------------------------------------------------------
+    lines.append("")
+    lines.append("### 3. APPLIED LOADS (FACTORED)")
+    for title, key, context in (
+        ("Compression (Stage 0)", "load_compression", "Stage 0"),
+        ("Tension (Stage 1)", "load_tension", "Stage 1"),
+        ("Shear (Stage 0)", "load_shear", "Stage 0"),
+        ("Moment (Stage 0)", "load_moment", "Stage 0"),
+    ):
+        add(_kp_bullet(title, _kp_find(loads, key, context)))
+
+    # 4. RESULTS (RATIOS) ---------------------------------------------------
+    lines.append("")
+    lines.append("### 4. RESULTS (RATIOS)")
+    ratio_points = [p for p in results if p.get("key") == "result_ratio"]
+    for point in ratio_points:
+        ctx = point.get("context") or ""
+        title = f"{point.get('label', 'D/C ratio')}{f' ({ctx})' if ctx else ''}"
+        add(_kp_bullet(title, point))
+
+    # 5. SETTLEMENT & LATERAL ----------------------------------------------
+    lines.append("")
+    lines.append("### 5. SETTLEMENT & LATERAL")
+    for title, point in (
+        ("Settlement at Design Load", _kp_find(results, "settlement_design")),
+        ("Settlement at Ultimate Load", _kp_find(results, "settlement_ultimate")),
+        ("Max Lateral Deflection", _kp_find(results, "lateral_deflection", "Stage 0")),
+        ("Max Internal Moment", _kp_find(results, "max_moment", "Stage 0")),
+    ):
+        add(_kp_bullet(title, point))
+
+    # 6. DURABILITY ---------------------------------------------------------
+    lines.append("")
+    lines.append("### 6. DURABILITY")
+    for title, point in (
+        ("Design Life", _kp_find(results, "design_life")),
+        ("Corrosion Thickness Loss", _kp_find(results, "corrosion_thickness_loss")),
+        ("Corrosion Steel Loss", _kp_find(results, "corrosion_steel_loss")),
+    ):
+        add(_kp_bullet(title, point))
+
+    # 7. SOIL MODELS --------------------------------------------------------
+    soil = [p for p in results if p.get("key") == "soil_model"]
+    if soil:
+        lines.append("")
+        lines.append("### 7. SOIL MODELS")
+        for point in soil:
+            ctx = point.get("context") or "Soil"
+            add(_kp_bullet(ctx, point))
+
+    # 8. EVALUATION ---------------------------------------------------------
+    ratio_values = [p["value"] for p in ratio_points if isinstance(p.get("value"), float)]
+    r_cap = max((p["value"] for p in ratio_points
+                 if p.get("label") == "R/CAP" and isinstance(p.get("value"), float)),
+                default=None)
+    settlement = _kp_find(results, "settlement_design")
+    if ratio_values and all(v < 1.0 for v in ratio_values):
+        if settlement is not None and _kp_fmt(settlement):
+            adequacy = (f"PASS - largest reported ratio is {max(ratio_values):g} < 1.0 "
+                        f"and a design settlement ({_kp_fmt(settlement)}) is reported.")
+        else:
+            adequacy = (f"PASS on strength (largest reported ratio "
+                        f"{max(ratio_values):g} < 1.0), but settlement requires "
+                        "engineer review (no design settlement reported).")
+    elif ratio_values:
+        adequacy = (f"FAIL - largest reported ratio is {max(ratio_values):g} >= 1.0; "
+                    "the governing check exceeds capacity.")
+    else:
+        adequacy = "FAIL - no printed utilisation ratio; adequacy cannot be demonstrated."
+
+    lines.append("")
+    lines.append("### 8. ENGINEERING EVALUATION")
+    lines.append(f"- **Overall Adequacy / Governing Limit State:** {adequacy}")
+    if r_cap is not None:
+        lines.append(f"- **Utilization:** R/CAP = {r_cap:g} against a limit of 1.0; "
+                     "no margin is calculated from unprinted values.")
+    if _kp_fmt(settlement):
+        lines.append(f"- **Settlement:** reported settlement is {_kp_fmt(settlement)}; "
+                     "the report prints no acceptance criterion, so tolerance "
+                     "compliance requires engineer review.")
+    missing = kp.get("missing") or []
+    if missing:
+        lines.append("- **Red Flags to Verify:** Missing from the source (never "
+                     "assumed): " + ", ".join(missing) + ". Confirm all soil "
+                     "parameters against the site geotechnical report.")
+    else:
+        lines.append("- **Red Flags to Verify:** None from the deterministic "
+                     "extraction. Confirm all soil parameters against the site "
+                     "geotechnical report.")
+    lines.append(_NOT_CERTIFIED)
+
+    return "\n".join(lines)
+
+
+def _key_points_as_fields(key_points: dict) -> list[ExtractedField]:
+    """Render key points as ExtractedField rows for the LLM prompt.
+
+    The model is fed ONLY the key points (already extracted, unit-carrying
+    values) -- never raw document text -- so it can only rephrase printed
+    values and can never pull a number out of prose.
+    """
+    out: list[ExtractedField] = []
+    for section in ("project", "pile", "loads", "results"):
+        for point in key_points.get(section) or []:
+            if not isinstance(point, dict):
+                continue
+            out.append(ExtractedField(
+                parameter=str(point.get("label") or point.get("key") or ""),
+                value=point.get("value"),
+                unit=point.get("unit"),
+                source=str(point.get("source") or ""),
+                location=str(point.get("location") or ""),
+                raw=str(point.get("raw") or ""),
+                context=str(point.get("context") or ""),
+                section=section,
+                unit_status="value" if point.get("unit") else "none",
+            ))
+    return out
+
+
 def generate_clean_summary(fields, project=None) -> str:
     """Build a deterministic engineering summary from extracted fields.
 
@@ -986,7 +1255,19 @@ def generate_clean_summary(fields, project=None) -> str:
     - Adequacy is PASS only when the report explicitly prints an R/CAP below
       1.0; otherwise the report is shown as FAIL with the reason.
     - Output is never certified or approved engineering work.
+
+    When the caller passes a key-points result (the Stage-2c dict, or any
+    object exposing ``to_dict``) instead of raw fields, the summary is built
+    directly from those key points -- the same deterministic layout, but every
+    line carries the source unit and no value is reconstructed.
     """
+    if isinstance(fields, dict) and "pile" in fields and "project" in fields:
+        return _clean_summary_from_key_points(fields)
+    if hasattr(fields, "to_dict") and not isinstance(fields, (list, tuple)):
+        payload = fields.to_dict()
+        if isinstance(payload, dict) and "pile" in payload and "results" in payload:
+            return _clean_summary_from_key_points(payload)
+
     values = {key: _first_smart(fields, searches)
               for key, searches in _SUMMARY_SEARCHES.items() if searches}
     # A measurement line only accepts a numeric value: a text match is a header

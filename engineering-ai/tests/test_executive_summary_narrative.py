@@ -16,7 +16,7 @@ from app.report.executive_summary import (
     build_executive_summary_text,
 )
 
-NOT_STATED = "not stated in the report"
+NOT_STATED = "Not specified"  # the single missing-value placeholder
 
 
 def _field(parameter, value, unit=None, context="", raw=None):
@@ -101,18 +101,18 @@ def test_title_then_exactly_five_paragraphs():
 def test_project_and_helix_details_are_copied_verbatim():
     text = build_executive_summary_text(_payload(STAGE_FIELDS, KEY_POINTS))
     assert "PEMB (PERIMETER A)" in _flat(text)
-    assert "7.63 in" in text
-    assert "0.375 in" in text
+    assert "7.63 in outside diameter (OD)" in text
+    assert "0.375 in thick steel helical pile shaft" in text
     assert "Fy = 80 ksi" in text
-    assert "24 in diameter helical plate" in text
+    assert "three 24 in diameter helical plates" in text
 
 
 def test_load_cases_are_described_per_stage():
     text = build_executive_summary_text(_payload(STAGE_FIELDS, KEY_POINTS))
     loads = _paragraphs(text)[2]
-    assert "2 governing design load cases" in loads
+    assert "two governing design load cases" in loads
     assert "Stage 0 (compression) consisted of a 150 k axial compressive load" in loads
-    assert "Stage 1 (uplift) consisted of 19.975 k uplift load" in loads
+    assert "Stage 1 (uplift) consisted of a 19.975 k uplift load" in loads
     assert "10 k lateral load" in loads
 
 
@@ -126,7 +126,7 @@ def test_software_methods_and_code_are_detected_from_text():
     assert "ICC-AC358" in text
 
 
-def test_missing_values_are_reported_as_not_stated():
+def test_missing_values_are_reported_as_not_specified():
     text = build_executive_summary_text({})
     assert NOT_STATED in _flat(text)
     assert "fully adequate for service" not in text
@@ -135,15 +135,18 @@ def test_missing_values_are_reported_as_not_stated():
 def test_all_ratios_within_1_but_no_settlement_criterion_requires_review():
     fields = [*STAGE_FIELDS, _field("R/GEO", 0.907, None, "Stage 0")]
     text = build_executive_summary_text(_payload(fields, KEY_POINTS, references=REFERENCES))
-    assert "requires engineer review" in text
-    assert "settlement criteria" in text
+    assert "All utilization ratios are below 1.0." in text
+    assert "engineer review are required before the design is accepted" in text
+    assert "adequate for service" not in text
 
 
 def test_over_capacity_ratio_requires_review_and_names_the_check():
     fields = [*STAGE_FIELDS, _field("R/GEO", 1.34, None, "Stage 0")]
     text = build_executive_summary_text(_payload(fields, KEY_POINTS, references=REFERENCES))
-    assert "exceeds 1.0" in text
-    assert "requires engineer review" in text
+    assert "exceeds the limit of 1.0" in text
+    assert "engineer review are required before the design is accepted" in text
+    assert "adequate" not in text
+    assert "compliance" not in text
 
 
 def test_fully_adequate_only_when_every_check_is_confirmed():
@@ -152,29 +155,190 @@ def test_fully_adequate_only_when_every_check_is_confirmed():
         _field("R/GEO", 0.907, None, "Stage 0"),
         _field("R/STR", 0.542, None, "Stage 0"),
         _field("R/CAP", 0.907, None, "Stage 0"),
-        _field("Settlement @des. cap.", 0.4, "in", "Stage 0"),
-        _field("Allowable settlement", 1.0, "in"),
+        _field("Settlement @des. cap.", 0.431, "in", "Stage 0"),
+        _field("Design capacity", 288.45, "k", "Stage 0"),
     ]
-    references = [
-        *REFERENCES,
-        {"text": "Installation verification criteria satisfied.", "source": "report.pdf"},
-    ]
-    text = build_executive_summary_text(_payload(fields, KEY_POINTS, references=references))
-    assert "fully adequate for service" in text
+    data = _payload(fields, KEY_POINTS, references=REFERENCES)
+    data["project_inputs"] = {
+        "system_descriptor": "",
+        "corrosion_category": "",
+        "reviewed_by_engineer": True,
+        "installation_verified": True,
+    }
+    text = build_executive_summary_text(data)
+    assert "the proposed helical foundation design is adequate for service." in text
     assert "requires engineer review" not in text
+    assert "fully adequate" not in text
+
+    data["project_inputs"]["installation_verified"] = False
+    review = build_executive_summary_text(data)
+    assert "adequate for service" not in review
+    assert "engineer review are required before the design is accepted" in review
 
 
 def test_bucket_pile_phrase_only_when_a_bucket_pile_is_described():
     plain = build_executive_summary_text(_payload(STAGE_FIELDS, KEY_POINTS))
-    assert "combined bucket pile-helical pile foundation system" not in plain
+    assert "foundation system" in plain
+    assert "bucket" not in plain
 
-    bucket = _payload(
-        STAGE_FIELDS,
-        KEY_POINTS,
-        references=[{"text": "Combined bucket pile and helical pile system.", "source": "r.pdf"}],
-    )
+    bucket = _payload(STAGE_FIELDS, KEY_POINTS)
+    bucket["project_inputs"] = {
+        "system_descriptor": "combined bucket pile\u2013helical pile",
+        "corrosion_category": "",
+        "reviewed_by_engineer": False,
+        "installation_verified": False,
+    }
     text = build_executive_summary_text(bucket)
-    assert "combined bucket pile-helical pile foundation system" in text
+    assert "combined bucket pile\u2013helical pile foundation system" in text
+
+
+TARGET_FIELDS = [
+    _field("Pile diameter O.D.", 7.63, "in"),
+    _field("Wall thickness", 0.375, "in"),
+    _field("Yield strength (Fy)", 80, "ksi"),
+    _field("Numbe", 3.0, None, "HP-1"),
+    _field("Dhel", 24.0, "in", "Plate 1"),
+    _field("Helix thickness", 0.5, "in", "Plate 1"),
+    _field("Axial load", 150.0, "k", "Stage 0"),
+    _field("Axial load", 19.975, "k", "Stage 1"),
+    _field("Shear", 10.0, "k", "Stage 0"),
+    _field("Shear", 10.0, "k", "Stage 1"),
+    _field("R/STR", 0.542, None, "Stage 0"),
+    _field("R/GEO", 0.907, None, "Stage 0"),
+    _field("R/CAP", 0.907, None, "Stage 0"),
+    _field("Settlement @des. cap.", 0.431, "in", "Stage 0"),
+    _field("Design capacity", 288.45, "k", "Stage 0"),
+]
+
+TARGET_KEY_POINTS = {
+    **KEY_POINTS,
+    "pile": [
+        {"key": "helix_count", "value": 3.0, "unit": None, "context": "HP-1"},
+        {"key": "helix_dia", "value": 24.0, "unit": "in", "context": "Plate 1"},
+        {"key": "helix_thickness", "value": 0.5, "unit": "in", "context": "Plate 1"},
+    ],
+    "results": [
+        {"key": "result_ratio", "label": "R/STR", "value": 0.542, "unit": None, "context": "Stage 0"},
+        {"key": "result_ratio", "label": "R/GEO", "value": 0.907, "unit": None, "context": "Stage 0"},
+        {"key": "corrosion_thickness_loss", "value": 0.01, "unit": "in", "context": ""},
+        {"key": "settlement_design", "value": 0.431, "unit": "in", "context": "Stage 0"},
+        {"key": "settlement_design_capacity", "value": 288.45, "unit": "k", "context": "Stage 0"},
+        {"key": "soil_model", "value": "Sand Reese", "unit": None, "context": "Soil"},
+        {"key": "soil_model", "value": "Sand API", "unit": None, "context": "SM 0-1"},
+    ],
+}
+
+TARGET_REFERENCES = [
+    {"text": "Vesic (1974) individual plate bearing method and API p-y lateral response.", "source": "r.pdf"},
+    {"text": "ANSI/AISC 360-22 Specification for Structural Steel Buildings.", "source": "r.pdf"},
+    {"text": "ICC-AC358 Acceptance Criteria for Helical Pile Systems.", "source": "r.pdf"},
+]
+
+CONFIGURED = {
+    "system_descriptor": "combined bucket pile\u2013helical pile",
+    "corrosion_category": "non-to-mildly aggressive",
+    "reviewed_by_engineer": True,
+    "installation_verified": True,
+}
+
+EMPTY_CONFIG = {
+    "system_descriptor": "",
+    "corrosion_category": "",
+    "reviewed_by_engineer": False,
+    "installation_verified": False,
+}
+
+
+def _target_payload(config):
+    data = _payload(TARGET_FIELDS, TARGET_KEY_POINTS, references=TARGET_REFERENCES)
+    data["document_text"] = "HelixPile 2026 DeepFND analysis. ANSI/AISC 360-22."
+    data["project_inputs"] = dict(config)
+    return data
+
+
+def test_complete_config_reproduces_target_template():
+    text = build_executive_summary_text(_target_payload(CONFIGURED))
+    assert "checks performed for PEMB (PERIMETER A)." in text
+    assert "a combined bucket pile\u2013helical pile foundation system consisting of" in text
+    assert "7.63 in outside diameter (OD)" in text
+    assert "0.375 in thick steel helical pile shaft (Fy = 80 ksi)" in text
+    assert "three 24 in diameter, 0.5 in thick helical plates" in text
+    assert "two governing design load cases" in text
+    assert "a 150 k axial compressive load" in text
+    assert "a 10 k lateral load" in text
+    assert "a 19.975 k uplift load" in text
+    assert "HelixPile (DeepFND)" in text
+    assert "Vesic (1974)" in text
+    assert "API p-y" in text
+    assert "ANSI/AISC 360-22" in text
+    assert "total projected section loss of 0.01 inches" in text
+    assert "maximum projected structural shaft utilization reaches 0.542" in text
+    assert "excellent structural capacity reserve in compliance with ANSI/AISC 360-22" in text
+    assert "code-compliant margin against soil plunge failure under the design load" in text
+    assert "the proposed helical foundation design is adequate for service." in text
+    assert "fully adequate" not in text
+
+
+def test_empty_config_falls_back_to_foundation_system():
+    text = build_executive_summary_text(_target_payload(EMPTY_CONFIG))
+    assert "foundation system" in text
+    assert "bucket" not in text
+    assert "categorized as" not in text
+    assert "All utilization ratios are below 1.0 and design settlement is 0.431 in at the " in text
+    assert "288.45-k design capacity" in text
+    assert "engineer review are required before the design is accepted" in text
+    assert "adequate for service" not in text
+
+
+def test_over_capacity_never_claims_adequate_or_compliance():
+    fields = [*TARGET_FIELDS, _field("R/STR", 1.01, None, "Stage 0")]
+    data = _payload(fields, TARGET_KEY_POINTS, references=TARGET_REFERENCES)
+    data["project_inputs"] = dict(CONFIGURED)
+    text = build_executive_summary_text(data)
+    assert "adequate" not in text
+    assert "compliance" not in text
+    assert "exceeds the limit of 1.0" in text
+
+
+def test_torque_conflict_appears_in_warnings():
+    from app.web.server import _pasted_document, _run_extraction
+
+    text = (
+        "Torque rating (by Manufacturer) = 5.5 k-ft\n"
+        "MODEL STAGES\n"
+        "Torque rating (by Manufacturer) Tel = 197.07 k-ft\n"
+    )
+    payload = _run_extraction([_pasted_document(text)])
+    assert any(
+        "5.5" in warning and "197.07" in warning for warning in payload["warnings"]
+    ), payload["warnings"]
+
+
+def test_chart_and_coordinate_conflicts_are_not_warned():
+    from app.web.server import _conflict_warnings
+
+    def conflict(parameter, values):
+        return {
+            "parameter": parameter,
+            "kind": "value",
+            "fields": [
+                {"value": v, "unit": "", "location": f"page {i + 1}"}
+                for i, v in enumerate(values)
+            ],
+        }
+
+    payload = {
+        "conflicts": [
+            conflict("El.", [1.0, 2.0]),               # coordinate table
+            conflict("Moment", [float(i) for i in range(12)]),  # plotted series
+            conflict("D.Tension", [1.0, 2.0]),          # interaction label
+            conflict("Fy", [345.0, 450.0]),             # genuine spec conflict
+        ]
+    }
+    warnings = _conflict_warnings(payload)
+    assert len(warnings) == 1
+    assert "Fy" in warnings[0]
+    assert not any("El." in w or "Moment" in w or "D.Tension" in w for w in warnings)
 
 
 def test_pdf_renders_the_narrative_text():
